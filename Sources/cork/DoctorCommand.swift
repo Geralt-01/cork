@@ -45,19 +45,38 @@ struct DoctorCommand: ParsableCommand {
             print(Terminal.dim("  fix: cork runtime install"))
         }
 
-        for result in manager.verify() where !result.installed && result.detail != "not installed" {
-            problems += 1
-            print(Terminal.warn("\(result.id): \(result.detail)"))
+        let listing = (try? BottleManager(paths: paths))?.listWithIssues() ?? BottleListing()
+        let requiredComponentIDs = Set(listing.bottles.compactMap { $0.settings.backend.requiresComponentID })
+
+        for result in manager.verify() where !result.installed {
+            if result.detail == "not installed" {
+                if requiredComponentIDs.contains(result.id) {
+                    problems += 1
+                    print(Terminal.cross("\(result.id): required by a bottle but not installed"))
+                    print(Terminal.dim("  fix: cork runtime install \(result.id)"))
+                }
+            } else {
+                problems += 1
+                print(Terminal.warn("\(result.id): \(result.detail)"))
+            }
         }
 
-        let bottles = (try? BottleManager(paths: paths))?.list() ?? []
-        print(Terminal.check("\(bottles.count) bottle(s) configured"))
+        if listing.issues.isEmpty {
+            print(Terminal.check("\(listing.bottles.count) bottle(s) configured"))
+        } else {
+            print(Terminal.bullet("\(listing.bottles.count) bottle(s) configured"))
+            for issue in listing.issues {
+                problems += 1
+                print(Terminal.warn("unreadable bottle '\(issue.directoryName)': \(issue.reason)"))
+            }
+        }
 
         print("")
         if problems == 0 {
             print(Terminal.green("Everything looks good."))
         } else {
             print(Terminal.yellow("\(problems) item(s) need attention."))
+            throw ExitCode.failure
         }
     }
 

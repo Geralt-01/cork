@@ -56,18 +56,33 @@ struct RuntimeCommand: AsyncParsableCommand {
         func run() throws {
             let paths = CorkPaths.resolve()
             let manager = try RuntimeManager(paths: paths)
+            let results = Dictionary(uniqueKeysWithValues: manager.verify().map { ($0.id, $0) })
             print(Terminal.bold("Cork runtime"))
             print(Terminal.dim("  home: \(paths.root.path)"))
             print("")
             print("  \("ID".padded(8)) \("VERSION".padded(10)) \("STATE".padded(12)) SIZE")
             for component in manager.manifest.components {
-                let installed = manager.store.isInstalled(component)
-                let plain = installed ? "installed" : "missing"
-                let state = installed ? Terminal.green(plain.padded(12)) : Terminal.dim(plain.padded(12))
+                let result = results[component.id]
+                let label: String
+                let state: String
+                if result?.installed == true {
+                    label = "installed"
+                    state = Terminal.green(label.padded(12))
+                } else if result?.detail == "not installed" || result == nil {
+                    label = "missing"
+                    state = Terminal.dim(label.padded(12))
+                } else if result?.detail == "version mismatch" {
+                    label = "outdated"
+                    state = Terminal.yellow(label.padded(12))
+                } else {
+                    label = "incomplete"
+                    state = Terminal.yellow(label.padded(12))
+                }
                 print("  \(component.id.padded(8)) \(component.version.padded(10)) \(state) \(Terminal.formatBytes(component.size))")
             }
             print("")
-            if manager.isWineReady {
+            let wineReady = manager.manifest.wineComponent.map { results[$0.id]?.installed == true } ?? false
+            if wineReady {
                 print(Terminal.check("Wine is ready. Create a bottle with: cork bottle create my-game"))
             } else {
                 print(Terminal.warn("Wine is not installed. Run: cork runtime install"))
@@ -107,12 +122,19 @@ struct RuntimeCommand: AsyncParsableCommand {
         @Flag(name: .long, help: "Remove all components.")
         var all = false
 
+        @Flag(name: .long, help: "Skip the confirmation prompt.")
+        var yes = false
+
         func run() throws {
             let manager = try RuntimeManager()
             let ids = all ? manager.manifest.components.map(\.id) : components
             guard !ids.isEmpty else {
                 throw ValidationError("Specify component ids to remove, or pass --all.")
             }
+            let summary = all
+                ? "Remove ALL runtime components (\(ids.count))?"
+                : "Remove runtime components: \(ids.joined(separator: ", "))?"
+            try Confirm.ask(summary, yes: yes)
             try manager.uninstall(componentIDs: ids)
             for id in ids {
                 print(Terminal.check("removed \(id)"))

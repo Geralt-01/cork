@@ -17,15 +17,49 @@ public struct BottleManager {
     }
 
     public func list() -> [Bottle] {
+        listWithIssues().bottles
+    }
+
+    /// Lists bottles, reporting directories that could not be loaded instead of
+    /// silently hiding them.
+    public func listWithIssues() -> BottleListing {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: paths.bottlesDirectory,
             includingPropertiesForKeys: [.isDirectoryKey]
-        ) else { return [] }
-        return entries
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .compactMap { try? Bottle.load(at: $0) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        ) else { return BottleListing() }
+
+        var listing = BottleListing()
+        for entry in entries where (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            do {
+                listing.bottles.append(try Bottle.load(at: entry))
+            } catch {
+                listing.issues.append(
+                    BottleListing.Issue(
+                        directoryName: entry.lastPathComponent,
+                        reason: Self.describeLoadError(error)
+                    )
+                )
+            }
+        }
+        listing.bottles.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        listing.issues.sort { $0.directoryName.localizedCaseInsensitiveCompare($1.directoryName) == .orderedAscending }
+        return listing
+    }
+
+    private static func describeLoadError(_ error: Error) -> String {
+        if let corkError = error as? CorkError {
+            switch corkError {
+            case .bottleNotFound:
+                return "missing cork/metadata.json"
+            default:
+                return corkError.errorDescription ?? "\(corkError)"
+            }
+        }
+        if error is DecodingError {
+            return "invalid cork/metadata.json"
+        }
+        return "\(error)"
     }
 
     public func exists(named name: String) -> Bool {
@@ -109,14 +143,15 @@ public struct BottleManager {
         var bottle = try load(named: name)
         try bottle.metadata.settings.apply(key: key, value: value)
 
-        if let installation = try? runtime.requireWine() {
+        let touchesPrefix = key == BottleSettings.Key.windows.rawValue
+            || key == BottleSettings.Key.backend.rawValue
+        if touchesPrefix {
+            let installation = try runtime.requireWine()
             if key == BottleSettings.Key.windows.rawValue {
                 try applyWindowsVersion(bottle.settings.windowsVersion, to: &bottle, installation: installation)
             }
-            if key == BottleSettings.Key.backend.rawValue, bottle.settings.backend != .wined3d {
+            if key == BottleSettings.Key.backend.rawValue {
                 try graphics.setBackend(bottle.settings.backend, on: &bottle)
-            } else if key == BottleSettings.Key.backend.rawValue {
-                try graphics.setBackend(.wined3d, on: &bottle)
             }
         }
 
@@ -228,4 +263,24 @@ public enum BottleCreateEvent: Sendable {
     case installingGraphics(GraphicsBackend)
     case warning(String)
     case created(String)
+}
+
+public struct BottleListing: Sendable {
+    public struct Issue: Sendable {
+        public let directoryName: String
+        public let reason: String
+
+        public init(directoryName: String, reason: String) {
+            self.directoryName = directoryName
+            self.reason = reason
+        }
+    }
+
+    public var bottles: [Bottle]
+    public var issues: [Issue]
+
+    public init(bottles: [Bottle] = [], issues: [Issue] = []) {
+        self.bottles = bottles
+        self.issues = issues
+    }
 }

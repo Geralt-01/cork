@@ -17,6 +17,22 @@ struct Cork: AsyncParsableCommand {
             DoctorCommand.self,
         ]
     )
+
+    static func main() async {
+        do {
+            var command = try await Self.asyncParseAsRoot(nil)
+            if var asyncCommand = command as? AsyncParsableCommand {
+                try await asyncCommand.run()
+            } else {
+                try command.run()
+            }
+        } catch {
+            if error is CorkError {
+                printErrorAndExit(error)
+            }
+            Self.exit(withError: error)
+        }
+    }
 }
 
 func printErrorAndExit(_ error: Error) -> Never {

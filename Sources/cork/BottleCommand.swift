@@ -26,6 +26,9 @@ struct BottleCommand: AsyncParsableCommand {
         @Flag(name: .long, help: "Replace an existing bottle with the same name.")
         var force = false
 
+        @Flag(name: .long, help: "Skip the confirmation prompt when replacing a bottle.")
+        var yes = false
+
         @Flag(name: .shortAndLong, help: "Show verbose output from Wine.")
         var verbose = false
 
@@ -39,6 +42,9 @@ struct BottleCommand: AsyncParsableCommand {
             }
 
             let manager = try BottleManager()
+            if force, manager.exists(named: name) {
+                try Confirm.ask("Bottle '\(name)' exists. Replace it and delete all of its data?", yes: yes)
+            }
             let progress = ProgressLine()
             let verbose = self.verbose
 
@@ -83,14 +89,19 @@ struct BottleCommand: AsyncParsableCommand {
 
         func run() throws {
             let manager = try BottleManager()
-            let bottles = manager.list()
-            guard !bottles.isEmpty else {
-                print(Terminal.dim("No bottles yet. Create one with: cork bottle create my-game"))
+            let listing = manager.listWithIssues()
+            for issue in listing.issues {
+                print(Terminal.warn("unreadable bottle '\(issue.directoryName)': \(issue.reason)"))
+            }
+            guard !listing.bottles.isEmpty else {
+                if listing.issues.isEmpty {
+                    print(Terminal.dim("No bottles yet. Create one with: cork bottle create my-game"))
+                }
                 return
             }
             print(Terminal.bold("Bottles"))
             print("  \("NAME".padded(24)) \("WINDOWS".padded(12)) \("BACKEND".padded(16)) CREATED")
-            for bottle in bottles {
+            for bottle in listing.bottles {
                 let line = "  "
                     + bottle.name.truncated(24).padded(24) + " "
                     + bottle.settings.windowsVersion.displayName.padded(12) + " "
@@ -138,8 +149,15 @@ struct BottleCommand: AsyncParsableCommand {
 
         @Argument(help: "Name of the bottle.") var name: String
 
+        @Flag(name: .long, help: "Skip the confirmation prompt.")
+        var yes = false
+
         func run() throws {
             let manager = try BottleManager()
+            guard manager.exists(named: name) else {
+                throw CorkError.bottleNotFound(name: name)
+            }
+            try Confirm.ask("Delete bottle '\(name)' and all of its data?", yes: yes)
             try manager.delete(named: name)
             print(Terminal.check("Deleted bottle '\(name)'"))
         }
@@ -206,7 +224,12 @@ struct BottleCommand: AsyncParsableCommand {
                 return
             }
             print(Terminal.dim(log.path))
-            let contents = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+            let contents: String
+            do {
+                contents = try String(contentsOf: log, encoding: .utf8)
+            } catch {
+                throw CorkError.fileSystem(reason: "could not read log file \(log.path): \(error.localizedDescription)")
+            }
             print(contents)
         }
     }
