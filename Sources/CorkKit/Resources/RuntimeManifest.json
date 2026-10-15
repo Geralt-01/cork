@@ -1,0 +1,48 @@
+{
+  "manifestVersion": 1,
+  "updatedAt": "2026-10-15",
+  "components": [
+    {
+      "id": "wine",
+      "kind": "wine",
+      "name": "Wine (development build)",
+      "version": "11.18",
+      "license": "LGPL-2.1-or-later",
+      "homepage": "https://github.com/Gcenx/macOS_Wine_builds",
+      "sourceURL": "https://github.com/wine-mirror/wine",
+      "url": "https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.18/wine-devel-11.18-osx64.tar.xz",
+      "sha256": "aa0ea4c82e636ae7bca2076387cb0a5affa26509ad13f119ecd0d62bd7ba6f82",
+      "size": 190974384,
+      "archiveFormat": "tar.xz",
+      "installRoot": "Wine Devel.app/Contents/Resources/wine"
+    },
+    {
+      "id": "dxmt",
+      "kind": "graphics",
+      "name": "DXMT",
+      "version": "0.80",
+      "license": "MIT",
+      "homepage": "https://github.com/3Shain/dxmt",
+      "sourceURL": "https://github.com/3Shain/dxmt/releases/tag/v0.80",
+      "url": "https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz",
+      "sha256": "8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d",
+      "size": 18681669,
+      "archiveFormat": "tar.gz",
+      "installRoot": "v0.80"
+    },
+    {
+      "id": "dxvk",
+      "kind": "graphics",
+      "name": "DXVK-macOS (async)",
+      "version": "1.10.3",
+      "license": "zlib",
+      "homepage": "https://github.com/Gcenx/DXVK-macOS",
+      "sourceURL": "https://github.com/Gcenx/DXVK-macOS/releases/tag/v1.10.3-20230507",
+      "url": "https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507/dxvk-macOS-async-v1.10.3-20230507.tar.gz",
+      "sha256": "f67d99d0a8eeedd7d406b283a3df9f939b5965acb00efcb33d0c6235c195a516",
+      "size": 7077450,
+      "archiveFormat": "tar.gz",
+      "installRoot": "dxvk-macOS-async-v1.10.3-20230507"
+    }
+  ]
+}

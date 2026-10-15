@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build --configuration release
+
+      - name: Test
+        run: swift run cork-tests
+
+      - name: CLI smoke test
+        run: |
+          .build/release/cork --help
+          .build/release/cork --version
+          .build/release/cork doctor || true
