@@ -28,6 +28,11 @@ var suites: [(String, [TestCase])] = [
     ("InstallRecipe", installRecipeTests()),
     ("Installer", installerTests()),
     ("Bundler", bundlerTests()),
+    ("Compat", compatTests()),
+    ("Deps", depsTests()),
+    ("Assoc", assocTests()),
+    ("Diag", diagTests()),
+    ("WineVersions", wineVersionsTests()),
 ]
 
 if ProcessInfo.processInfo.environment["CORK_INTEGRATION"] == "1" {

@@ -15,6 +15,8 @@ struct Cork: AsyncParsableCommand {
             AppCommand.self,
             InstallCommand.self,
             BundleCommand.self,
+            DepCommand.self,
+            AssocCommand.self,
             RunCommand.self,
             ExecCommand.self,
             DoctorCommand.self,
