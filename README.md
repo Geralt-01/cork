@@ -77,14 +77,17 @@ cork doctor
 | `cork runtime install [components…] [--force]` | Download and install runtime components |
 | `cork runtime status` | Show installed components |
 | `cork runtime verify [--strict]` | Check components against the pinned manifest |
-| `cork runtime uninstall <components…> [--all]` | Remove components |
-| `cork bottle create <name> [--backend] [--windows]` | Create a bottle |
+| `cork runtime uninstall <components…> [--all] [--yes]` | Remove components |
+| `cork runtime files` | Print the Cork home directory |
+| `cork bottle create <name> [--backend <backend>] [--windows <ver>] [--force] [--yes]` | Create a bottle |
 | `cork bottle list` | List bottles |
 | `cork bottle info <name>` | Show a bottle's settings |
 | `cork bottle set <name> key=value…` | Change settings |
+| `cork bottle logs <name> [--path]` | Show (or print the path to) a bottle's latest log |
 | `cork bottle kill <name>` | Stop all processes in a bottle |
-| `cork bottle delete <name>` | Delete a bottle |
+| `cork bottle delete <name> [--yes]` | Delete a bottle |
 | `cork run <bottle> <exe> [--detach] [-- args…]` | Run a Windows program |
+| `cork exec <bottle> <command> [args…]` | Run a Wine built-in (cmd, winecfg, reg, …) |
 | `cork doctor` | Check the environment |
 
 ## How it works
@@ -107,7 +110,8 @@ cork doctor
 - **Graphics** components are copied into each bottle (or referenced via `WINEDLLPATH`),
   so backends are per-bottle and reversible.
 
-Set `CORK_HOME` to relocate everything (used by the test suite).
+Set `CORK_HOME` to relocate everything (for example, to keep a self-contained
+install on an external drive).
 
 ## Why some games don't run
 

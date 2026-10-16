@@ -8,7 +8,9 @@ let package = Package(
     ],
     products: [
         .library(name: "CorkKit", targets: ["CorkKit"]),
+        .library(name: "CorkEngine", targets: ["CorkEngine"]),
         .executable(name: "cork", targets: ["cork"]),
+        .executable(name: "cork-app", targets: ["cork-app"]),
         .executable(name: "cork-tests", targets: ["cork-tests"]),
     ],
     dependencies: [
@@ -22,17 +24,32 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .target(
+            name: "CorkEngine",
+            dependencies: ["CorkKit"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "cork",
             dependencies: [
                 "CorkKit",
+                "CorkEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
+            name: "cork-app",
+            dependencies: [
+                "CorkKit",
+                "CorkEngine",
+            ],
+            path: "Sources/CorkApp",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
             name: "cork-tests",
-            dependencies: ["CorkKit"],
+            dependencies: ["CorkKit", "CorkEngine"],
             path: "Tests/CorkTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

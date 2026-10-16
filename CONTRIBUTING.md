@@ -45,8 +45,8 @@ Guidelines:
 ## Testing
 
 Cork ships its own tiny runner (`cork-tests`) instead of XCTest or Swift Testing, so the
-suite works on a bare macOS install with only the Command Line Tools. Tests import CorkKit
-with `@testable`, which the compiler only allows in debug builds — always use the default:
+suite works on a bare macOS install with only the Command Line Tools. Tests use the public
+CorkKit API (`import CorkKit`), so they run the same way in debug and release builds:
 
 ```sh
 swift run cork-tests
