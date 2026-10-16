@@ -35,12 +35,37 @@ struct CorkApp: App {
                 }
                 .keyboardShortcut("2", modifiers: .command)
 
+                Button("Bottle Files") {
+                    model.section = .files
+                }
+                .keyboardShortcut("3", modifiers: .command)
+
                 Divider()
 
                 Button("Refresh") {
                     model.refreshAll()
                 }
                 .keyboardShortcut("r", modifiers: .command)
+            }
+            CommandMenu("Bottle") {
+                Button("Browse Bottle Files") {
+                    model.section = .files
+                    if let name = model.selectedBottleName {
+                        model.selectFilesBottle(name)
+                    }
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(model.bottles.isEmpty)
+
+                Button("Scan for Programs") {
+                    model.section = .files
+                    if let name = model.selectedBottleName {
+                        model.selectFilesBottle(name)
+                    }
+                    model.discoverPrograms()
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(model.selectedBottle == nil || model.isDiscoveringPrograms)
             }
         }
     }
@@ -61,6 +86,8 @@ struct RootView: View {
                 BottlesView()
             case .applications:
                 CatalogView()
+            case .files:
+                BottleFilesView()
             }
         } detail: {
             switch section {
@@ -68,6 +95,8 @@ struct RootView: View {
                 BottleDetailView()
             case .applications:
                 CatalogDetailView()
+            case .files:
+                BottleFilesDetailView()
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -80,6 +109,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showCreateSheet) {
             CreateBottleSheet()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showInstallSheet) {
+            InstallWizardSheet()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showBundleSheet) {
+            CreateBundleSheet()
                 .environmentObject(model)
         }
         .sheet(isPresented: logsPresented) {
