@@ -22,8 +22,13 @@ struct DepCommand: AsyncParsableCommand {
         func run() {
             let manager = DependencyManager()
             let all = manager.components()
-            print(Terminal.bold("\(all.count) dependency components"))
-            for component in all where category.map({ component.category.caseInsensitiveCompare($0) == .orderedSame }) ?? true {
+            let components = all.filter { component in
+                guard let category else { return true }
+                return component.category.caseInsensitiveCompare(category) == .orderedSame
+            }
+            let scope = category.map { " (\($0))" } ?? ""
+            print(Terminal.bold("\(components.count) dependency components\(scope)"))
+            for component in components {
                 let id = component.id.padding(toLength: 14, withPad: " ", startingAt: 0)
                 print("  \(id)\(component.name)  \(component.summary ?? "")")
             }
