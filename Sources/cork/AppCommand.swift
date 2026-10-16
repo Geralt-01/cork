@@ -72,12 +72,21 @@ struct AppCommand: AsyncParsableCommand {
             print(Terminal.bold(app.name))
             print("  id:          \(app.id)")
             if let category = app.category { print("  category:    \(category)") }
+            if let rating = app.rating { print("  rating:      \(rating)/5") }
             if let medal = app.medal { print("  medal:       \(medal)") }
+            if let version = app.version { print("  version:     \(version)") }
             if let template = app.bottleTemplate { print("  bottle:      \(template)") }
             print("  installer:   \(app.hasInstaller ? "yes" : "no")")
+            if let installerVersion = app.installerVersion {
+                print("  win version: \(installerVersion)")
+            }
             if !app.dependencies.isEmpty {
                 print("  requires:    \(app.dependencies.joined(separator: ", "))")
             }
+            if !app.defaultAssociations.isEmpty {
+                print("  opens:       \(app.defaultAssociations.joined(separator: ", "))")
+            }
+            if let notes = app.installNotes { print("  notes:       \(notes)") }
             if let summary = app.summary { print("  \(summary)") }
         }
     }
