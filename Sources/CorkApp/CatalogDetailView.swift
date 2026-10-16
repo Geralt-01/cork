@@ -35,6 +35,27 @@ struct CatalogDetailView: View {
     @ViewBuilder
     private func detail(for app: RecipeApp) -> some View {
         Form {
+            Section("Install") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.hasInstaller
+                             ? "This app has an automated install recipe."
+                             : "This entry is metadata-only in the catalog; there may be no automated installer.")
+                            .font(.callout)
+                        Text("Cork runs the recipe against a bottle you choose.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        model.requestInstall(app)
+                    } label: {
+                        Label("Install…", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
             Section("Application") {
                 LabeledContent("Name", value: app.name)
                 LabeledContent("Identifier", value: app.id)
@@ -108,5 +129,15 @@ struct CatalogDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(app.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.requestInstall(app)
+                } label: {
+                    Label("Install", systemImage: "arrow.down.circle")
+                }
+                .help("Install “\(app.name)” into a bottle")
+            }
+        }
     }
 }

@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     enum Section: String, CaseIterable, Identifiable {
         case bottles
         case applications
+        case files
 
         var id: String { rawValue }
 
@@ -26,6 +27,7 @@ final class AppModel: ObservableObject {
             switch self {
             case .bottles: return "Bottles"
             case .applications: return "Applications"
+            case .files: return "Bottle Files"
             }
         }
 
@@ -33,6 +35,7 @@ final class AppModel: ObservableObject {
             switch self {
             case .bottles: return "shippingbox"
             case .applications: return "square.grid.2x2"
+            case .files: return "folder"
             }
         }
     }
@@ -80,6 +83,54 @@ final class AppModel: ObservableObject {
     @Published var selectedCategory: String?
     @Published var selectedAppID: String?
     @Published var isCatalogLoading = false
+
+    // MARK: Install wizard
+
+    @Published var showInstallSheet = false
+    @Published var installAppID = ""
+    @Published var installAppName = ""
+    /// Existing bottle the recipe installs into.
+    @Published var installExistingBottle: String?
+    /// When true, a brand-new bottle is created inline before installing.
+    @Published var installCreateNewBottle = false
+    @Published var installNewBottleName = ""
+    @Published var installLog: [String] = []
+    @Published var isInstalling = false
+    /// `.running` while unanswered; otherwise the terminal outcome.
+    @Published var installOutcome: InstallOutcome = .running
+
+    enum InstallOutcome: Equatable {
+        case running
+        case succeeded
+        case failed
+        case noRecipe
+    }
+
+    // MARK: Bottle file browser
+
+    @Published var filesBottleName: String?
+    /// Path components beneath `drive_c` describing the directory being listed.
+    @Published var browserComponents: [String] = []
+    @Published var browserEntries: [BrowserEntry] = []
+    @Published var browserSelectedURL: URL?
+
+    // MARK: Installed / discovered programs
+
+    @Published var discoveredPrograms: [DiscoveredProgram] = []
+    @Published var isDiscoveringPrograms = false
+
+    // MARK: App bundling
+
+    @Published var showBundleSheet = false
+    @Published var bundleBottleName = ""
+    @Published var bundleExecutableURL: URL?
+    @Published var bundleName = ""
+    @Published var bundleIconPath: URL?
+    @Published var bundleOutputDirectory: URL = BottleFiles.defaultApplicationsDirectory
+    @Published var bundleArguments = ""
+    @Published var isBundling = false
+    @Published var bundledAppURL: URL?
+    @Published var bundleError: String?
 
     // MARK: Alerts
 
@@ -147,6 +198,9 @@ final class AppModel: ObservableObject {
         switch section ?? .bottles {
         case .bottles: refreshBottles()
         case .applications: refreshCatalog()
+        case .files:
+            refreshBottles()
+            refreshBrowser()
         }
     }
 
@@ -456,5 +510,393 @@ final class AppModel: ObservableObject {
         } else {
             selectedAppID = catalogApps.first?.id
         }
+    }
+
+    // MARK: Install wizard
+
+    /// Opens the install wizard for a catalog entry.
+    func requestInstall(_ app: RecipeApp) {
+        installAppID = app.id
+        installAppName = app.name
+        installExistingBottle = selectedBottleName ?? bottles.first?.name
+        installCreateNewBottle = bottles.isEmpty
+        installNewBottleName = Self.suggestBottleName(for: app.name)
+        installLog = []
+        isInstalling = false
+        installOutcome = .running
+        showInstallSheet = true
+    }
+
+    /// A bottle name derived from an app name that passes `Bottle.validateName`.
+    static func suggestBottleName(for appName: String) -> String {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _.-")
+        let filtered = String(appName.unicodeScalars.map { allowed.contains($0) ? Character($0) : " " })
+        var name = filtered.trimmingCharacters(in: .whitespacesAndNewlines)
+        name = name.replacingOccurrences(of: "  ", with: " ")
+        if name.isEmpty || name.hasPrefix(".") { name = "Bottle" }
+        if name.count > 64 { name = String(name.prefix(64)) }
+        if (try? Bottle.validateName(name)) == nil { name = "Bottle" }
+        return name
+    }
+
+    /// True when the wizard has enough information to attempt an install.
+    var installTargetIsValid: Bool {
+        if installCreateNewBottle {
+            let trimmed = installNewBottleName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (try? Bottle.validateName(trimmed)) != nil
+        }
+        return installExistingBottle.map { name in bottles.contains { $0.name == name } } ?? false
+    }
+
+    /// Runs the install on a background task, streaming `InstallEvent`s into the
+    /// live log. Never blocks the UI thread.
+    func startInstall() {
+        guard bottleManager != nil else {
+            installOutcome = .failed
+            appendInstallLog("No bottle manager: \(startupError ?? "the runtime could not be loaded").")
+            return
+        }
+        let targetBottle: String
+        if installCreateNewBottle {
+            targetBottle = installNewBottleName.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            targetBottle = installExistingBottle ?? ""
+        }
+        guard !targetBottle.isEmpty else {
+            installOutcome = .failed
+            appendInstallLog("Choose a target bottle first.")
+            return
+        }
+
+        isInstalling = true
+        installOutcome = .running
+        installLog = []
+        appendInstallLog("Installing “\(installAppName)” into “\(targetBottle)”…")
+
+        let appID = installAppID
+        let appName = installAppName
+        let catalogFile = catalogURL
+        let createNew = installCreateNewBottle
+        let paths = self.paths
+        let box = bottleManager.map { UncheckedSendable($0) }
+
+        Task {
+            defer { self.isInstalling = false }
+            do {
+                if createNew {
+                    guard let box else { throw CorkError.runtimeNotInstalled }
+                    self.appendInstallLog("Creating bottle “\(targetBottle)”…")
+                    _ = try await Task.detached { () -> Bottle in
+                        try await box.value.create(
+                            named: targetBottle,
+                            settings: BottleSettings(),
+                            onEvent: { event in
+                                Task { @MainActor in self.appendInstallLog(Self.describe(event)) }
+                            }
+                        )
+                    }.value
+                    self.refreshBottles()
+                    self.selectedBottleName = targetBottle
+                }
+
+                guard let catalogFile else {
+                    throw CorkError.unsupported(reason: "no catalog is loaded, so there is no install recipe")
+                }
+
+                let recipes = try await Task.detached {
+                    try CrossTieInstallRecipes(fileURL: catalogFile)
+                }.value
+
+                guard let recipe = recipes.installRecipe(appID: appID) else {
+                    self.appendInstallLog("No automated install recipe is available for “\(appName)”.")
+                    self.installOutcome = .noRecipe
+                    return
+                }
+
+                self.appendInstallLog("Executing \(recipe.steps.count) recipe step(s).")
+                let installer = WineInstaller(paths: paths)
+                try await Task.detached {
+                    try await installer.install(recipe: recipe, into: targetBottle) { event in
+                        Task { @MainActor in self.appendInstallLog(Self.describe(event)) }
+                    }
+                }.value
+
+                self.appendInstallLog("Done — “\(appName)” finished installing.")
+                self.installOutcome = .succeeded
+                self.refreshBottles()
+            } catch {
+                let message = Self.describe(error)
+                self.appendInstallLog("Failed: \(message)")
+                self.installOutcome = .failed
+            }
+        }
+    }
+
+    func appendInstallLog(_ line: String) {
+        installLog.append(line)
+    }
+
+    func closeInstallSheet() {
+        guard !isInstalling else { return }
+        showInstallSheet = false
+    }
+
+    nonisolated static func describe(_ event: InstallEvent) -> String {
+        switch event {
+        case .resolving(let detail):
+            return "Resolving: \(detail)"
+        case .downloading(let name, let totalBytes):
+            if let totalBytes, totalBytes > 0 {
+                return "Downloading \(name) (\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)))…"
+            }
+            return "Downloading \(name)…"
+        case .running(let command):
+            return "Running: \(command)"
+        case .copying(let detail):
+            return "Copying: \(detail)"
+        case .shortcut(let name):
+            return "Creating shortcut: \(name)"
+        case .registry(let detail):
+            return "Applying registry: \(detail)"
+        case .warning(let message):
+            return "Warning: \(message)"
+        case .finished:
+            return "Recipe finished."
+        }
+    }
+
+    // MARK: Bottle file browser
+
+    /// The bottle whose `drive_c` is currently browsed.
+    var filesBottle: Bottle? {
+        if let name = filesBottleName, let match = bottles.first(where: { $0.name == name }) {
+            return match
+        }
+        return selectedBottle
+    }
+
+    /// The directory represented by the current breadcrumb, if it exists.
+    var browserDirectory: URL? {
+        guard let bottle = filesBottle else { return nil }
+        var url = bottle.driveCDirectory
+        for component in browserComponents {
+            url.appendPathComponent(component, isDirectory: true)
+        }
+        return url
+    }
+
+    func selectFilesBottle(_ name: String?) {
+        filesBottleName = name
+        browserComponents = []
+        browserSelectedURL = nil
+        discoveredPrograms = []
+        refreshBrowser()
+    }
+
+    func refreshBrowser() {
+        guard let directory = browserDirectory else {
+            browserEntries = []
+            return
+        }
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            browserEntries = []
+            return
+        }
+        let entries = contents.map { url -> BrowserEntry in
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            return BrowserEntry(
+                url: url,
+                isDirectory: values?.isDirectory ?? false,
+                size: Int64(values?.fileSize ?? 0)
+            )
+        }
+        browserEntries = entries.sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    func browserEnter(_ entry: BrowserEntry) {
+        guard entry.isDirectory else {
+            browserSelectedURL = entry.url
+            return
+        }
+        browserComponents.append(entry.name)
+        browserSelectedURL = nil
+        refreshBrowser()
+    }
+
+    func browserGoUp() {
+        guard !browserComponents.isEmpty else { return }
+        browserComponents.removeLast()
+        browserSelectedURL = nil
+        refreshBrowser()
+    }
+
+    func browserGoTo(index: Int) {
+        guard index < browserComponents.count else { return }
+        browserComponents = Array(browserComponents.prefix(index))
+        browserSelectedURL = nil
+        refreshBrowser()
+    }
+
+    /// Scans the selected bottle's `drive_c` for `.exe` files (bounded depth) and
+    /// merges the metadata pins, so the Installed Programs list is populated.
+    func discoverPrograms() {
+        guard let bottle = filesBottle else {
+            present(CorkError.bottleNotFound(name: filesBottleName ?? ""), title: "Cannot scan bottle")
+            return
+        }
+        isDiscoveringPrograms = true
+        let root = bottle.driveCDirectory
+        let pins = bottle.metadata.pins
+
+        Task {
+            let found = await Task.detached { () -> [DiscoveredProgram] in
+                BottleFiles.discoverExecutables(under: root, limit: 400)
+            }.value
+            self.discoveredPrograms = BottleFiles.merge(pins: pins, discovered: found)
+            self.isDiscoveringPrograms = false
+        }
+    }
+
+    /// Programs known for a bottle without a full scan: metadata pins plus any
+    /// previously discovered list when it belongs to the same bottle.
+    func knownPrograms(for bottle: Bottle) -> [DiscoveredProgram] {
+        if filesBottleName == bottle.name, !discoveredPrograms.isEmpty {
+            return discoveredPrograms
+        }
+        return BottleFiles.merge(pins: bottle.metadata.pins, discovered: [])
+    }
+
+    // MARK: Program launch
+
+    func launchProgram(bottleName: String, executable: URL, arguments: [String] = []) {
+        guard let manager = bottleManager else {
+            present(CorkError.runtimeNotInstalled, title: "Cannot run program")
+            return
+        }
+        let box = UncheckedSendable(manager)
+        Task {
+            do {
+                let status = try await Task.detached {
+                    try box.value.run(
+                        named: bottleName,
+                        executable: executable,
+                        arguments: arguments,
+                        detach: true
+                    )
+                }.value
+                alert = AppAlert(
+                    title: "Run finished",
+                    message: "\(executable.lastPathComponent) exited with status \(status)."
+                )
+            } catch {
+                present(error, title: "Could not run \(executable.lastPathComponent)")
+            }
+        }
+    }
+
+    // MARK: App bundling
+
+    /// Opens the bundle sheet for an executable inside a bottle.
+    func requestBundle(bottleName: String, executable: URL) {
+        bundleBottleName = bottleName
+        bundleExecutableURL = executable
+        bundleName = executable.deletingPathExtension().lastPathComponent
+        bundleIconPath = nil
+        bundleOutputDirectory = BottleFiles.defaultApplicationsDirectory
+        bundleArguments = ""
+        bundledAppURL = nil
+        bundleError = nil
+        showBundleSheet = true
+    }
+
+    func chooseBundleIcon() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an Icon"
+        panel.message = "Select an image (.icns, .png, .tiff, …) to use as the app icon."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK {
+            bundleIconPath = panel.url
+        }
+    }
+
+    func chooseBundleOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Output Folder"
+        panel.message = "Cork will create <name>.app in this folder."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = bundleOutputDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            bundleOutputDirectory = url
+        }
+    }
+
+    var bundleIsValid: Bool {
+        guard let executable = bundleExecutableURL, executable.pathExtension.lowercased() == "exe" else {
+            return false
+        }
+        guard !bundleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard !bundleBottleName.isEmpty else { return false }
+        return true
+    }
+
+    func createBundle() {
+        guard let executable = bundleExecutableURL else {
+            bundleError = "No executable selected."
+            return
+        }
+        guard let manager = bottleManager else {
+            bundleError = CorkError.runtimeNotInstalled.errorDescription
+            return
+        }
+        let name = bundleName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let arguments = bundleArguments
+            .split(whereSeparator: { $0 == " " })
+            .map(String.init)
+        let icon = bundleIconPath
+        let output = bundleOutputDirectory
+        let bottleName = bundleBottleName
+
+        isBundling = true
+        bundleError = nil
+        bundledAppURL = nil
+
+        let box = UncheckedSendable(manager)
+        Task {
+            do {
+                let url = try await Task.detached { () -> URL in
+                    let bottle = try box.value.load(named: bottleName)
+                    let bundler = AppBundler()
+                    return try bundler.createBundle(
+                        name: name,
+                        bottle: bottle,
+                        executable: executable.path,
+                        arguments: arguments,
+                        iconPath: icon,
+                        outputDirectory: output
+                    )
+                }.value
+                self.bundledAppURL = url
+                self.isBundling = false
+            } catch {
+                self.bundleError = Self.describe(error)
+                self.isBundling = false
+            }
+        }
+    }
+
+    func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
