@@ -24,6 +24,7 @@ var suites: [(String, [TestCase])] = [
     ("Archive", archiveTests()),
     ("BottleSettings", bottleSettingsTests()),
     ("Bottle", bottleTests()),
+    ("CrossTie", crossTieTests()),
 ]
 
 if ProcessInfo.processInfo.environment["CORK_INTEGRATION"] == "1" {
