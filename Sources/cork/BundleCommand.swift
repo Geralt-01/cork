@@ -64,7 +64,14 @@ struct BundleCommand: AsyncParsableCommand {
             outputDirectory: output
         )
 
+        // Apply the bottle's file-type associations to the new bundle so the
+        // generated .app opens the documents its programs are registered for.
+        let registered = (try? AssociationStore().registerInBundle(url, bottle: bottle)) ?? []
+
         print(Terminal.check("Created \(url.path)"))
+        if !registered.isEmpty {
+            print(Terminal.dim("  file associations: \(registered.joined(separator: ", "))"))
+        }
         print(Terminal.dim("  launch with: open \"\(url.path)\""))
     }
 

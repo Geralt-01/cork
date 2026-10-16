@@ -878,7 +878,7 @@ final class AppModel: ObservableObject {
                 let url = try await Task.detached { () -> URL in
                     let bottle = try box.value.load(named: bottleName)
                     let bundler = AppBundler()
-                    return try bundler.createBundle(
+                    let created = try bundler.createBundle(
                         name: name,
                         bottle: bottle,
                         executable: executable.path,
@@ -886,6 +886,9 @@ final class AppModel: ObservableObject {
                         iconPath: icon,
                         outputDirectory: output
                     )
+                    // Best-effort: apply the bottle's file-type associations.
+                    _ = try? AssociationStore().registerInBundle(created, bottle: bottleName)
+                    return created
                 }.value
                 self.bundledAppURL = url
                 self.isBundling = false
