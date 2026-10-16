@@ -1,0 +1,252 @@
+import Foundation
+
+/// A description of a Windows shortcut to create.
+public struct ShortcutSpec: Sendable, Equatable {
+    /// Shortcut base name (no `.lnk`).
+    public var name: String
+    /// Full Windows path of the `.lnk` to create.
+    public var linkWindowsPath: String
+    /// Windows path of the shortcut target.
+    public var targetWindowsPath: String
+    /// Optional working directory.
+    public var workingDirectoryWindowsPath: String?
+    /// Arguments passed to the target.
+    public var arguments: [String]
+    /// Optional description / comment.
+    public var description: String?
+
+    public init(
+        name: String,
+        linkWindowsPath: String,
+        targetWindowsPath: String,
+        workingDirectoryWindowsPath: String? = nil,
+        arguments: [String] = [],
+        description: String? = nil
+    ) {
+        self.name = name
+        self.linkWindowsPath = linkWindowsPath
+        self.targetWindowsPath = targetWindowsPath
+        self.workingDirectoryWindowsPath = workingDirectoryWindowsPath
+        self.arguments = arguments
+        self.description = description
+    }
+}
+
+/// Creates Windows `.lnk` shortcuts.
+///
+/// Approach and limits (documented for the install track):
+///
+/// * **Primary** — generate a small VBScript and run it through Wine's
+///   `WScript.Shell.CreateShortcut` via `cscript`. This is the *faithful* method:
+///   Wine's shell builds a complete Shell Link with a target ID list, icon
+///   metadata and shell-relative paths.
+/// * **Fallback** — if no runtime is available (or `cscript` fails), write a
+///   minimal, spec-shaped `.lnk` directly with a `LinkInfo` (`VolumeID` +
+///   `LocalBasePath`) block and Unicode string data. It carries the target,
+///   working directory and arguments, but has **no target ID list**, so it may
+///   not resolve on every Windows version and won't show a custom icon.
+///
+/// The pure helpers here (``spec(for:appID:userName:)``, ``vbsScript(for:)`` and
+/// ``minimalLink(_:)``) are unit-tested without a runtime.
+public enum ShortcutWriter {
+    // MARK: - Spec
+
+    /// Build a ``ShortcutSpec`` from a ``InstallStepKind/createShortcut`` step.
+    ///
+    /// Assumptions (the frozen model is underspecified here):
+    /// * `destination` (falling back to `command`, then `source`) is the target.
+    /// * `fileName` (falling back to the target's base name) is the shortcut name.
+    /// * `source` is used as the link path only when it already ends in `.lnk`;
+    ///   otherwise the shortcut goes on the user's Desktop.
+    /// * `workingDirectory` / `arguments` are copied from the step.
+    public static func spec(for step: InstallStep, appID: String, userName: String = NSUserName()) -> ShortcutSpec? {
+        guard let target = firstNonEmpty(step.destination, step.command, step.source) else { return nil }
+        let name = defaultName(explicit: step.fileName, target: target, appID: appID)
+
+        let linkPath: String
+        if let source = step.source, source.lowercased().hasSuffix(".lnk") {
+            linkPath = source
+        } else {
+            linkPath = "C:\\users\\\(userName)\\Desktop\\\(name).lnk"
+        }
+
+        return ShortcutSpec(
+            name: name,
+            linkWindowsPath: linkPath,
+            targetWindowsPath: target,
+            workingDirectoryWindowsPath: step.workingDirectory ?? parentWindowsPath(of: target),
+            arguments: step.arguments,
+            description: step.description
+        )
+    }
+
+    public static func defaultName(explicit: String?, target: String, appID: String) -> String {
+        if let explicit, !explicit.isEmpty {
+            let base = (explicit as NSString).lastPathComponent
+            let stripped = stripWindowsExtension(base)
+            if !stripped.isEmpty { return stripped }
+        }
+        let base = (target.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+        let stripped = stripWindowsExtension(base)
+        return stripped.isEmpty ? appID : stripped
+    }
+
+    static func stripWindowsExtension(_ name: String) -> String {
+        if name.lowercased().hasSuffix(".exe") { return String(name.dropLast(4)) }
+        if let dot = name.lastIndex(of: "."), dot != name.startIndex { return String(name[..<dot]) }
+        return name
+    }
+
+    static func parentWindowsPath(of target: String) -> String? {
+        guard let index = target.lastIndex(where: { $0 == "\\" || $0 == "/" }), index != target.startIndex else {
+            return nil
+        }
+        return String(target[..<index])
+    }
+
+    // MARK: - Faithful path (Wine + WScript.Shell)
+
+    /// A VBScript that creates the shortcut using `WScript.Shell`.
+    public static func vbsScript(for spec: ShortcutSpec) -> String {
+        func quoted(_ value: String) -> String {
+            "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        var lines = [
+            "' Generated by Cork. Do not edit.",
+            "Option Explicit",
+            "Dim shell, link",
+            "Set shell = CreateObject(\"WScript.Shell\")",
+            "Set link = shell.CreateShortcut(\(quoted(spec.linkWindowsPath)))",
+            "link.TargetPath = \(quoted(spec.targetWindowsPath))",
+        ]
+        if let working = spec.workingDirectoryWindowsPath, !working.isEmpty {
+            lines.append("link.WorkingDirectory = \(quoted(working))")
+        }
+        if !spec.arguments.isEmpty {
+            lines.append("link.Arguments = \(quoted(spec.arguments.joined(separator: " ")))")
+        }
+        if let description = spec.description, !description.isEmpty {
+            lines.append("link.Description = \(quoted(description))")
+        }
+        lines.append("link.Save")
+        return lines.joined(separator: "\r\n") + "\r\n"
+    }
+
+    // MARK: - Minimal fallback
+
+    private static let shellLinkCLSID: [UInt8] = [
+        0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+    ]
+
+    /// Build a minimal Shell Link (`.lnk`) as raw bytes. See the type docs for
+    /// the limitations of the fallback.
+    public static func minimalLink(_ spec: ShortcutSpec) -> Data {
+        let target = spec.targetWindowsPath
+        let relativePath = (target.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+        let working = spec.workingDirectoryWindowsPath ?? ""
+        let arguments = spec.arguments.joined(separator: " ")
+
+        var flags: UInt32 = 0x0000_0002 // HasLinkInfo
+            | 0x0000_0004             // HasName
+            | 0x0000_0008             // HasRelativePath
+            | 0x0000_0080             // IsUnicode
+        if !working.isEmpty { flags |= 0x0000_0010 } // HasWorkingDir
+        if !arguments.isEmpty { flags |= 0x0000_0020 } // HasArguments
+
+        // LinkInfo (ANSI, header size 0x1C): VolumeID + LocalBasePath + suffix.
+        let volumeLabel = Array("Cork".utf8)
+        let localBasePath = Array(target.utf8)
+        let headerSize = 0x1C
+        let volumeIDSize = 16 + volumeLabel.count + 1
+        let volumeIDOffset = headerSize
+        let localBasePathOffset = volumeIDOffset + volumeIDSize
+        let commonPathSuffixOffset = localBasePathOffset + localBasePath.count + 1
+        let linkInfoSize = commonPathSuffixOffset + 1
+
+        var linkInfo = Data()
+        linkInfo.appendLE(UInt32(linkInfoSize))
+        linkInfo.appendLE(UInt32(headerSize))
+        linkInfo.appendLE(UInt32(1)) // VolumeIDAndLocalBasePath
+        linkInfo.appendLE(UInt32(volumeIDOffset))
+        linkInfo.appendLE(UInt32(localBasePathOffset))
+        linkInfo.appendLE(UInt32(0)) // CommonNetworkRelativeLinkOffset
+        linkInfo.appendLE(UInt32(commonPathSuffixOffset))
+        // VolumeID
+        linkInfo.appendLE(UInt32(volumeIDSize))
+        linkInfo.appendLE(UInt32(3)) // DRIVE_FIXED
+        linkInfo.appendLE(UInt32(0)) // serial
+        linkInfo.appendLE(UInt32(0x10)) // label offset
+        linkInfo.append(contentsOf: volumeLabel)
+        linkInfo.append(0)
+        // LocalBasePath
+        linkInfo.append(contentsOf: localBasePath)
+        linkInfo.append(0)
+        // CommonPathSuffix
+        linkInfo.append(0)
+
+        var data = Data()
+        data.appendLE(UInt32(0x4C)) // header size
+        data.append(contentsOf: shellLinkCLSID)
+        data.appendLE(flags)
+        data.appendLE(UInt32(0x20)) // FILE_ATTRIBUTE_ARCHIVE
+        data.appendLE(UInt64(0)) // creation time
+        data.appendLE(UInt64(0)) // access time
+        data.appendLE(UInt64(0)) // write time
+        data.appendLE(UInt32(0)) // file size
+        data.appendLE(Int32(0)) // icon index
+        data.appendLE(UInt32(1)) // SW_SHOWNORMAL
+        data.appendLE(UInt16(0)) // hot key
+        data.appendLE(UInt16(0)) // reserved
+        data.appendLE(UInt32(0)) // reserved2
+        data.appendLE(UInt32(0)) // reserved3
+
+        data.append(linkInfo)
+        data.appendUnicodeString(spec.name)
+        data.appendUnicodeString(relativePath)
+        if !working.isEmpty { data.appendUnicodeString(working) }
+        if !arguments.isEmpty { data.appendUnicodeString(arguments) }
+        data.appendLE(UInt32(0)) // terminal block
+        return data
+    }
+
+    private static func firstNonEmpty(_ values: String?...) -> String? {
+        for value in values {
+            if let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
+private extension Data {
+    mutating func appendLE(_ value: UInt16) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+    }
+
+    mutating func appendLE(_ value: UInt32) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+        append(UInt8((value >> 16) & 0xFF))
+        append(UInt8((value >> 24) & 0xFF))
+    }
+
+    mutating func appendLE(_ value: Int32) {
+        appendLE(UInt32(bitPattern: value))
+    }
+
+    mutating func appendLE(_ value: UInt64) {
+        for shift in stride(from: 0, through: 56, by: 8) {
+            append(UInt8((value >> UInt64(shift)) & 0xFF))
+        }
+    }
+
+    mutating func appendUnicodeString(_ value: String) {
+        let units = Array(value.utf16)
+        appendLE(UInt16(units.count + 1))
+        for unit in units { appendLE(unit) }
+        appendLE(UInt16(0))
+    }
+}
