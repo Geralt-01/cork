@@ -19,12 +19,22 @@ struct AssocCommand: AsyncParsableCommand {
         @Argument(help: "Name of the bottle.")
         var bottle: String
 
+        @Flag(name: .long, help: "Also print the Wine registry commands that are applied.")
+        var registry: Bool = false
+
         func run() throws {
-            let entries = try AssociationStore().read(bottle: bottle)
+            let store = AssociationStore()
+            let entries = try store.read(bottle: bottle)
             print(Terminal.bold("\(entries.count) associations in '\(bottle)'"))
             for entry in entries {
                 let ext = entry.fileExtension.padding(toLength: 8, withPad: " ", startingAt: 0)
                 print("  \(ext)\(entry.progID)  →  \(entry.executable)")
+            }
+            if registry, !entries.isEmpty {
+                print(Terminal.dim("  registry commands:"))
+                for line in AssociationRegistry.commandLines(for: entries) {
+                    print("    \(line)")
+                }
             }
         }
     }
@@ -52,9 +62,7 @@ struct AssocCommand: AsyncParsableCommand {
         func run() throws {
             var ext = fileExtension
             if !ext.hasPrefix(".") { ext = "." + ext }
-            let base = URL(fileURLWithPath: executable).deletingPathExtension().lastPathComponent
-                .replacingOccurrences(of: " ", with: "")
-            let resolved = progID ?? ("Cork" + base + String(ext.dropFirst()))
+            let resolved = progID ?? Self.generatedProgID(executable: executable, fileExtension: ext)
             try AssociationStore().set(
                 AssociationEntry(
                     fileExtension: ext,
@@ -65,6 +73,23 @@ struct AssocCommand: AsyncParsableCommand {
                 bottle: bottle
             )
             print(Terminal.check("\(ext) → \(executable) in '\(bottle)'"))
+        }
+
+        /// Builds a stable ProgID from the program name and extension, e.g.
+        /// `CorkPhotoshopImage12Psd`. Handles both Unix and `C:\…` paths.
+        static func generatedProgID(executable: String, fileExtension ext: String) -> String {
+            let normalized = executable
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\\", with: "/")
+            let base = (normalized as NSString).lastPathComponent
+            let stem = (base as NSString).deletingPathExtension
+            let allowed = CharacterSet.alphanumerics
+            let name = stem.unicodeScalars
+                .filter { allowed.contains($0) }
+                .map(String.init)
+                .joined()
+            let suffix = ext.dropFirst()
+            return "Cork\(name.isEmpty ? "App" : name)\(suffix)"
         }
     }
 
