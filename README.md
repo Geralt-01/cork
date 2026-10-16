@@ -168,6 +168,13 @@ Cork's performance depends on the game, your Mac (Apple Silicon), chosen backend
 | **Portal 2** | Puzzle | 60–120 | Great performance. |
 | **Among Us** | Party | 60+ | Usually fine (no kernel anti-cheat). |
 | **Terraria** | Sandbox | 60+ | Great. |
+| **Life is Strange** | Story/Adventure | 60+ | Great narrative game, runs well on Apple Silicon. |
+| **Life is Strange: Before the Storm** | Story/Adventure | 60+ | Plays smoothly with DXMT. |
+| **Telltale's The Walking Dead** | Story/Adventure | 50–60 | Runs well, occasional minor hiccups. |
+| **The Wolf Among Us** | Story/Adventure | 50–60 | Stable, great for story fans. |
+| **Firewatch** | Story/Adventure | 60+ | Lightweight, runs flawlessly. |
+| **What Remains of Edith Finch** | Story/Adventure | 60+ | Beautiful and stable. |
+| **Oxenfree** | Story/Adventure | 60+ | Plays very well. |
 | **Borderlands 2** | FPS/RPG | 40–80 | Playable with DXMT on Apple Silicon. |
 
 *Anti-cheat games (EAC/BattlEye/Vanguard) often refuse to launch online under Wine on macOS. Cork surfaces honest errors rather than faking it.*
