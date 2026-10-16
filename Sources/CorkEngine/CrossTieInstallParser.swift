@@ -128,8 +128,13 @@ struct CrossTieInstallRecord: Sendable {
         Self.appendUnique(&dllOverrides, other.dllOverrides)
         Self.appendUnique(&installerOptions, other.installerOptions)
         Self.appendUnique(&silentOptions, other.silentOptions)
-        Self.appendUnique(&installerGlobs, other.installerGlobs)
-        Self.appendUnique(&localInstallerGlobs, other.localInstallerGlobs)
+        // `<installerglob>`/`<localinstallerglob>` are authored together with a
+        // record's `<downloadurl>`, and the URL scalars below are last-wins.
+        // These globs must be last-wins too: unioning them across records pairs
+        // a download from one version with an installer glob from another
+        // (e.g. 7-Zip downloads 7z920.exe but would run 7z46*.exe).
+        if !other.installerGlobs.isEmpty { installerGlobs = other.installerGlobs }
+        if !other.localInstallerGlobs.isEmpty { localInstallerGlobs = other.localInstallerGlobs }
         Self.appendUnique(&cdGlobs, other.cdGlobs)
         Self.appendUnique(&predependencies, other.predependencies)
         Self.appendUnique(&embeddedProfileAppIDs, other.embeddedProfileAppIDs)
@@ -394,8 +399,17 @@ extension CrossTieInstallRecord {
         return nil
     }
 
+    /// The concrete file name the download should be written to.
+    ///
+    /// `<downloadglob>` is only honoured when it is a *concrete* name. When it
+    /// is a glob pattern (e.g. `7z*.exe`) the real name has to come from the
+    /// URL, otherwise the file lands on disk literally called `7z*.exe` and no
+    /// later `<installerglob>` can match it.
     private func downloadFileName(fallbackURL: String) -> String? {
-        if let glob = downloadGlob, !glob.isEmpty { return Self.basename(glob) ?? glob }
+        if let glob = downloadGlob, !glob.isEmpty {
+            let base = Self.basename(glob) ?? glob
+            if !Self.isGlob(base) { return base }
+        }
         return Self.fileName(fromURL: fallbackURL)
     }
 
@@ -441,11 +455,23 @@ extension CrossTieInstallRecord {
         return normalized
     }
 
+    /// Whether a string is a shell-style glob rather than a literal file name.
+    static func isGlob(_ value: String) -> Bool {
+        value.contains("*") || value.contains("?")
+    }
+
     /// Derive a file name from a URL the same way the installer does.
+    ///
+    /// Trailing generic segments (`.../7z920.exe/download`, from SourceForge and
+    /// similar mirrors) are skipped so the real file name is returned.
     static func fileName(fromURL urlString: String) -> String? {
         guard let url = URL(string: urlString) else { return nil }
-        var base = url.lastPathComponent
-        if base.isEmpty { base = (url.path as NSString).lastPathComponent }
+        var components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        let generic: Set<String> = ["download", "downloads", "dl", "get", "redirect"]
+        while let last = components.last, generic.contains(last.lowercased()) {
+            components.removeLast()
+        }
+        var base = components.last ?? url.lastPathComponent
         base = base.removingPercentEncoding ?? base
         return base.isEmpty ? nil : base
     }

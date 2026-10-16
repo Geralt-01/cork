@@ -27,8 +27,47 @@ func installerTests() -> [TestCase] {
                 "c.zip"
             )
             try expect(InstallPlanner.fileName(forURL: "", explicit: nil) == nil, "empty url derives nothing")
+            try expectEqual(
+                InstallPlanner.fileName(
+                    forURL: "https://sourceforge.net/projects/sevenzip/files/7-Zip/9.20/7z920.exe/download",
+                    explicit: nil
+                ),
+                "7z920.exe",
+                "a trailing generic '/download' segment is skipped"
+            )
             try expect(InstallPlanner.isZip("Setup.ZIP"), "case-insensitive zip detection")
             try expect(!InstallPlanner.isZip("Setup.exe"), "exe is not a zip")
+        }),
+
+        TestCase(name: "installerGlobResolution", body: {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("cork-glob-\(UUID().uuidString)")
+            let driveC = root.appendingPathComponent("drive_c", isDirectory: true)
+            let cache = root.appendingPathComponent("cache", isDirectory: true)
+            try FileManager.default.createDirectory(at: driveC, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            // 7-Zip-style: the `<installerglob>` is not the literal downloaded name.
+            let downloaded = cache.appendingPathComponent("7z920.exe")
+            try Data("bin".utf8).write(to: downloaded)
+            let environment = InstallPlanner.windowsEnvironment(driveC: driveC, userName: "tester")
+
+            try expect(InstallPlanner.isGlob("7z92*.exe"), "a '*' pattern is a glob")
+            try expect(!InstallPlanner.isGlob("7z920.exe"), "a concrete name is not a glob")
+            try expect(
+                InstallPlanner.commandLooksLikeFile("7z92*.exe", driveC: driveC, cache: cache, environment: environment),
+                "an installer glob should resolve against the downloaded file"
+            )
+            try expectEqual(
+                InstallPlanner.resolveLocalPath("7z92*.exe", driveC: driveC, cache: cache, environment: environment),
+                downloaded.standardizedFileURL.path,
+                "the glob resolves to the real downloaded file"
+            )
+            try expect(
+                !InstallPlanner.commandLooksLikeFile("zz*.exe", driveC: driveC, cache: cache, environment: environment),
+                "an unmatched glob is not a file"
+            )
         }),
 
         TestCase(name: "windowsPathResolution", body: {

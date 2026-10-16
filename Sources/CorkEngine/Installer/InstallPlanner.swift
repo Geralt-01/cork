@@ -113,10 +113,12 @@ public enum InstallPlanner {
             return base.isEmpty ? nil : base
         }
         guard let url = URL(string: urlString) else { return nil }
-        var base = url.lastPathComponent
-        if base.isEmpty {
-            base = (url.path as NSString).lastPathComponent
+        var components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        let generic: Set<String> = ["download", "downloads", "dl", "get", "redirect"]
+        while let last = components.last, generic.contains(last.lowercased()) {
+            components.removeLast()
         }
+        var base = components.last ?? url.lastPathComponent
         base = base.removingPercentEncoding ?? base
         return base.isEmpty ? nil : base
     }
@@ -228,6 +230,13 @@ public enum InstallPlanner {
         environment: [String: String]
     ) -> String {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `<installerglob>`/`<localinstallerglob>` are globs (e.g. `7z92*.exe`),
+        // not literal names: resolve them against what was actually downloaded.
+        if isGlob(trimmed) {
+            let normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
+            if let match = firstGlobMatch(pattern: normalized, root: cache) { return match }
+            if let match = firstGlobMatch(pattern: normalized, root: driveC) { return match }
+        }
         if trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
             return (trimmed as NSString).expandingTildeInPath
         }
@@ -249,11 +258,60 @@ public enum InstallPlanner {
         cache: URL,
         environment: [String: String]
     ) -> Bool {
+        if isGlob(command) {
+            let normalized = command.replacingOccurrences(of: "\\", with: "/")
+            return firstGlobMatch(pattern: normalized, root: cache) != nil
+                || firstGlobMatch(pattern: normalized, root: driveC) != nil
+        }
         if command.contains("/") || command.contains("\\") || command.hasPrefix("%") || command.hasPrefix("~") {
             return true
         }
         let resolved = resolveLocalPath(command, driveC: driveC, cache: cache, environment: environment)
         return FileManager.default.fileExists(atPath: resolved)
+    }
+
+    /// Whether `value` is a shell-style glob (`*`/`?`) rather than a literal path.
+    public static func isGlob(_ value: String) -> Bool {
+        value.contains("*") || value.contains("?")
+    }
+
+    /// The first regular file under `root` whose path relative to `root` (or
+    /// base name, for patterns without a directory component) matches `pattern`.
+    /// Matching is case-insensitive, as Windows file names are.
+    static func firstGlobMatch(pattern: String, root: URL) -> String? {
+        let normalized = pattern
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base = (normalized as NSString).lastPathComponent
+        let rootPath = root.standardizedFileURL.path
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return nil
+        }
+        for case let url as URL in enumerator {
+            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+            guard isFile else { continue }
+            let full = url.standardizedFileURL.path
+            let relative = full.hasPrefix(rootPath + "/") ? String(full.dropFirst(rootPath.count + 1)) : url.lastPathComponent
+            if globMatches(normalized, relative) || globMatches(base, url.lastPathComponent) {
+                return full
+            }
+        }
+        return nil
+    }
+
+    /// Case-insensitive shell glob match supporting `*` and `?`.
+    static func globMatches(_ pattern: String, _ name: String) -> Bool {
+        var regex = "^"
+        for character in pattern {
+            switch character {
+            case "*": regex += ".*"
+            case "?": regex += "."
+            default: regex += NSRegularExpression.escapedPattern(for: String(character))
+            }
+        }
+        regex += "$"
+        return name.range(of: regex, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     static func expandEnvironment(_ value: String, environment: [String: String]) -> String {

@@ -153,6 +153,35 @@ private let installChainFixture = #"""
 </c4p>
 """#
 
+/// A 7-Zip-style catalog: one `appid` with two `<cxversion>` records, each
+/// pairing a *versioned* download URL with its own installer glob, plus a
+/// glob-valued `<downloadglob>` on the newer record. Cork must keep the
+/// download URL and the installer glob from the *same* record.
+private let installTwoVersionFixture = #"""
+<?xml version="1.0" encoding="UTF-8"?>
+<c4p>
+  <applications>
+    <app appid="com.example.twover" timestamp="2020-01-01T00:00:00-06:00">
+      <cxversion product="cxoffice">9.0</cxversion>
+      <name>Two Ver</name>
+      <appprofile>
+        <downloadurl>https://example.com/files/4.65/app465.exe/download</downloadurl>
+      </appprofile>
+      <installprofile><installerglob>app46*.exe</installerglob></installprofile>
+    </app>
+    <app appid="com.example.twover" timestamp="2022-01-01T00:00:00-06:00">
+      <cxversion product="cxoffice">10.0</cxversion>
+      <name>Two Ver</name>
+      <appprofile>
+        <downloadurl>https://example.com/files/9.20/app920.exe/download</downloadurl>
+        <downloadglob>app*.exe</downloadglob>
+      </appprofile>
+      <installprofile><installerglob>app92*.exe</installerglob></installprofile>
+    </app>
+  </applications>
+</c4p>
+"""#
+
 /// Parses `xml` via a temporary file that is removed immediately afterwards.
 private func makeInstallRecipes(_ xml: String) throws -> CrossTieInstallRecipes {
     let url = FileManager.default.temporaryDirectory
@@ -366,6 +395,34 @@ func installRecipeTests() -> [TestCase] {
             try expectThrows(CrossTieParserError.self, "unterminated XML should throw") {
                 _ = try makeInstallRecipes("<?xml version=\"1.0\"?><c4p><applications><app appid=\"x\">")
             }
+        }),
+
+        TestCase(name: "installRecipeKeepsDownloadAndInstallerGlobCoherent", body: {
+            // Regression: two records for one appid must not be cross-mixed —
+            // a download URL from one version paired with the installer glob of
+            // another (7-Zip downloaded 7z920.exe but ran 7z46*.exe).
+            let recipes = try makeInstallRecipes(installTwoVersionFixture)
+            let recipe = try recipe(recipes, "com.example.twover")
+            try expectEqual(recipe.steps.map(\.kind), [.download, .runInstaller])
+
+            let download = recipe.steps[0]
+            try expectEqual(
+                download.url,
+                "https://example.com/files/9.20/app920.exe/download" as String?,
+                "the newest record's download url wins"
+            )
+            try expectEqual(
+                download.fileName,
+                "app920.exe" as String?,
+                "a glob-valued <downloadglob> is not used as a literal file name; the URL name is"
+            )
+
+            let installer = recipe.steps[1]
+            try expectEqual(
+                installer.command,
+                "app92*.exe" as String?,
+                "the installer glob comes from the same record as the download url"
+            )
         }),
     ]
 }

@@ -35,6 +35,13 @@ they already exist on their machine (see `CrossOverData`).
 - **CD-based installers** are modelled explicitly: when the main setup can be derived
   (e.g. `setup.exe`) a real `.runInstaller` step is emitted; otherwise an explicit
   "installation media required" step is produced instead of a silent no-op.
+- **Glob-aware installer resolution**: `<installerglob>`/`<localinstallerglob>` are
+  glob patterns (e.g. `7z92*.exe`), not literal names. They are resolved against the
+  files that were actually downloaded (case-insensitively), and a glob-valued
+  `<downloadglob>` no longer becomes a literal on-disk file name. When an app has
+  several `<cxversion>` records, the download URL and its installer glob are taken
+  from the **same** (last) record, so a download is never paired with another
+  version's installer.
 - `cork install <bottle> <appid>` executes a recipe against a bottle, streaming events.
 
 ## Phase 4 — Dependencies ✅
@@ -76,12 +83,15 @@ they already exist on their machine (see `CrossOverData`).
   and are marked manual.
 - A `.lk`/`.lnk` shortcut falls back to a minimal Shell Link when `cscript` is
   unavailable.
+- Recipes without an `<installersilentoption>` run the vendor's interactive
+  installer; Cork launches it and waits for the user, exactly as CrossOver does.
 
 ## Verify
 ```sh
 swift build
 swift run cork doctor
 swift run cork app search word --catalog "<your crossover.tie>"
+swift run cork app recipe com.codeweavers.c4.8843   # 7-Zip: download → 7z920.exe, run → 7z92*.exe
 swift run cork deps list
 .build/debug/cork-tests
 ```

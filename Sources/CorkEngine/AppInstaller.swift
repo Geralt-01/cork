@@ -138,8 +138,8 @@ public struct WineInstaller: AppInstalling {
             }
 
         case .run(let command, let arguments, _, let isInstaller):
-            let display = ([command] + arguments).joined(separator: " ")
-            onEvent(.running(display))
+            let shown = resolvedDisplayName(command, bottle: bottle, cache: cache, environment: environment)
+            onEvent(.running(([shown] + arguments).joined(separator: " ")))
             do {
                 let status = try runProcess(
                     command: command,
@@ -201,6 +201,30 @@ public struct WineInstaller: AppInstalling {
     }
 
     // MARK: - Steps
+
+    /// The file a command resolves to, for progress output: an `<installerglob>`
+    /// such as `7z92*.exe` is shown as the real installer name (`7z920.exe`).
+    /// Non-file commands (`cmd`, `winecfg`, …) are shown unchanged.
+    private func resolvedDisplayName(
+        _ command: String,
+        bottle: Bottle,
+        cache: URL,
+        environment: [String: String]
+    ) -> String {
+        guard InstallPlanner.commandLooksLikeFile(
+            command,
+            driveC: bottle.driveCDirectory,
+            cache: cache,
+            environment: environment
+        ) else { return command }
+        let path = InstallPlanner.resolveLocalPath(
+            command,
+            driveC: bottle.driveCDirectory,
+            cache: cache,
+            environment: environment
+        )
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
 
     private func performDownload(
         urlString: String,
