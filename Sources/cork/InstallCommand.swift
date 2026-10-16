@@ -22,17 +22,30 @@ struct InstallCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Path to a CrossTie catalog. Defaults to a detected CrossOver install.")
     var catalog: String?
 
+    @Flag(name: [.short, .long], help: "Skip the confirmation prompt.")
+    var yes = false
+
     func run() async throws {
         let url = try locateCatalog(explicit: catalog)
         let recipes = try CrossTieInstallRecipes(fileURL: url)
         guard let recipe = recipes.installRecipe(appID: appID) else {
             throw ValidationError("No install recipe for '\(appID)' in \(url.lastPathComponent).")
         }
+
+        let stepCount = recipe.steps.count
+        let stepLabel = stepCount == 1 ? "1 step" : "\(stepCount) steps"
+        try Confirm.ask("Install '\(appID)' into bottle '\(bottle)' (\(stepLabel))?", yes: yes)
+
         let installer = WineInstaller()
         try await installer.install(recipe: recipe, into: bottle) { event in
             switch event {
             case .resolving(let what): print(Terminal.arrow("resolving \(what)"))
-            case .downloading(let name, _): print(Terminal.arrow("downloading \(name)"))
+            case .downloading(let name, let totalBytes):
+                if let totalBytes {
+                    print(Terminal.arrow("downloading \(name) (\(Terminal.formatBytes(totalBytes)))"))
+                } else {
+                    print(Terminal.arrow("downloading \(name)"))
+                }
             case .running(let what): print(Terminal.arrow("running \(what)"))
             case .copying(let what): print(Terminal.arrow("copying \(what)"))
             case .shortcut(let what): print(Terminal.arrow("shortcut \(what)"))
