@@ -1,6 +1,7 @@
 {
   "manifestVersion": 1,
   "updatedAt": "2026-10-15",
+  "defaultWineVersion": "11.18",
   "components": [
     {
       "id": "wine",

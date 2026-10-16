@@ -8,6 +8,17 @@ public struct InstalledComponentRecord: Codable, Sendable {
     public let fileCount: Int
 }
 
+/// Persisted pointer to the user's preferred Wine version. Stored alongside the
+/// installed runtimes so several Wine builds can coexist while one is treated as
+/// the active default.
+public struct WineSelection: Codable, Sendable, Equatable {
+    public let version: String
+
+    public init(version: String) {
+        self.version = version
+    }
+}
+
 public struct RuntimeStore {
     public let paths: CorkPaths
 
@@ -16,6 +27,7 @@ public struct RuntimeStore {
     }
 
     private static let markerName = ".cork-component.json"
+    private static let selectionName = ".selected-wine.json"
 
     public func markerURL(for component: RuntimeManifest.Component) -> URL {
         paths.componentDirectory(id: component.id, version: component.version)
@@ -62,6 +74,31 @@ public struct RuntimeStore {
         for component in try RuntimeManifest.loadBundled().validate().components {
             try remove(component)
         }
+        try? clearSelectedWineVersion()
+    }
+
+    /// Location of the persisted Wine selection pointer.
+    public var selectionURL: URL {
+        paths.runtimesDirectory.appendingPathComponent(Self.selectionName)
+    }
+
+    /// The version the user has selected, or `nil` when nothing is selected.
+    public func selectedWineVersion() -> String? {
+        guard let data = try? Data(contentsOf: selectionURL) else { return nil }
+        return (try? JSONDecoder.cork.decode(WineSelection.self, from: data))?.version
+    }
+
+    /// Persists the selected Wine version.
+    public func setSelectedWineVersion(_ version: String) throws {
+        try FileManager.default.createDirectory(at: paths.runtimesDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder.cork.encode(WineSelection(version: version))
+        try data.write(to: selectionURL, options: .atomic)
+    }
+
+    /// Clears the Wine selection, restoring the manifest default.
+    public func clearSelectedWineVersion() throws {
+        guard FileManager.default.fileExists(atPath: selectionURL.path) else { return }
+        try FileManager.default.removeItem(at: selectionURL)
     }
 
     public func fileCount(in directory: URL) -> Int {

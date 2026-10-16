@@ -3,6 +3,10 @@ import Foundation
 public struct RuntimeManifest: Codable, Sendable {
     public let manifestVersion: Int
     public let updatedAt: String
+    /// Optional version string marking which Wine component is the default.
+    /// Absent (or pointing at an unknown version) falls back to the first
+    /// `kind == .wine` component, preserving the single-entry behaviour.
+    public let defaultWineVersion: String?
     public let components: [Component]
 
     public enum Kind: String, Codable, Sendable {
@@ -31,8 +35,42 @@ public struct RuntimeManifest: Codable, Sendable {
         components.first { $0.id == id }
     }
 
+    /// Every Wine component in manifest order. May contain several entries so
+    /// multiple Wine versions can coexist in the same Cork home.
+    public var wineComponents: [Component] {
+        components.filter { $0.kind == .wine }
+    }
+
+    /// The default Wine component. Kept as the primary entry point so existing
+    /// callers keep working with a single-entry manifest.
     public var wineComponent: Component? {
-        components.first { $0.kind == .wine }
+        defaultWineComponent
+    }
+
+    /// Resolves the manifest's default Wine component: the entry named by
+    /// `defaultWineVersion` when present and valid, otherwise the first Wine
+    /// entry.
+    public var defaultWineComponent: Component? {
+        if let pinned = defaultWineVersion, !pinned.isEmpty,
+           let match = wineComponent(forVersion: pinned) {
+            return match
+        }
+        return wineComponents.first
+    }
+
+    /// Looks a Wine component up by its version string, falling back to a match
+    /// on the component id. Matching is case-insensitive and whitespace
+    /// tolerant.
+    public func wineComponent(forVersion version: String) -> Component? {
+        let needle = version.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return nil }
+        return wineComponents.first { $0.version.lowercased() == needle }
+            ?? wineComponents.first { $0.id.lowercased() == needle }
+    }
+
+    /// Version strings for every Wine component, in manifest order.
+    public var wineVersions: [String] {
+        wineComponents.map(\.version)
     }
 }
 
