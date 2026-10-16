@@ -64,8 +64,22 @@ public struct RuntimeManifest: Codable, Sendable {
     public func wineComponent(forVersion version: String) -> Component? {
         let needle = version.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return nil }
-        return wineComponents.first { $0.version.lowercased() == needle }
-            ?? wineComponents.first { $0.id.lowercased() == needle }
+        if let match = wineComponents.first(where: { $0.version.lowercased() == needle })
+            ?? wineComponents.first(where: { $0.id.lowercased() == needle }) {
+            return match
+        }
+        // Accept display forms such as "wine-11.18" recorded in bottle metadata.
+        let stripped: String
+        if needle.hasPrefix("wine-") {
+            stripped = String(needle.dropFirst("wine-".count))
+        } else if needle.hasPrefix("wine_") {
+            stripped = String(needle.dropFirst("wine_".count))
+        } else {
+            stripped = needle
+        }
+        guard stripped != needle, !stripped.isEmpty else { return nil }
+        return wineComponents.first { $0.version.lowercased() == stripped }
+            ?? wineComponents.first { $0.id.lowercased() == stripped }
     }
 
     /// Version strings for every Wine component, in manifest order.

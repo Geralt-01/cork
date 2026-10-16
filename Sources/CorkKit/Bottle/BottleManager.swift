@@ -79,7 +79,8 @@ public struct BottleManager {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw CorkError.bottleNotFound(name: name)
         }
-        if let bottle = try? Bottle.load(at: url), runtime.isWineReady, let installation = try? runtime.requireWine() {
+        if let bottle = try? Bottle.load(at: url), runtime.isWineReady,
+           let installation = try? wineInstallation(for: bottle) {
             _ = try? WineProcess.killServer(installation: installation, bottle: bottle)
         }
         try FileManager.default.removeItem(at: url)
@@ -146,7 +147,7 @@ public struct BottleManager {
         let touchesPrefix = key == BottleSettings.Key.windows.rawValue
             || key == BottleSettings.Key.backend.rawValue
         if touchesPrefix {
-            let installation = try runtime.requireWine()
+            let installation = try wineInstallation(for: bottle)
             if key == BottleSettings.Key.windows.rawValue {
                 try applyWindowsVersion(bottle.settings.windowsVersion, to: &bottle, installation: installation)
             }
@@ -175,7 +176,7 @@ public struct BottleManager {
         onLine: (@Sendable (String) -> Void)? = nil
     ) throws -> Int32 {
         let bottle = try load(named: name)
-        let installation = try runtime.requireWine()
+        let installation = try wineInstallation(for: bottle)
         guard FileManager.default.fileExists(atPath: executable.path) else {
             throw CorkError.fileSystem(reason: "no such executable: \(executable.path)")
         }
@@ -208,7 +209,7 @@ public struct BottleManager {
         onLine: (@Sendable (String) -> Void)? = nil
     ) throws -> Int32 {
         let bottle = try load(named: name)
-        let installation = try runtime.requireWine()
+        let installation = try wineInstallation(for: bottle)
 
         let environment = WineEnvironment.launchEnvironment(bottle: bottle, installation: installation)
         let logFile = bottle.logsDirectory.appendingPathComponent("run-\(Self.timestamp()).log")
@@ -225,8 +226,21 @@ public struct BottleManager {
     @discardableResult
     public func kill(named name: String) throws -> ProcessResult {
         let bottle = try load(named: name)
-        let installation = try runtime.requireWine()
+        let installation = try wineInstallation(for: bottle)
         return try WineProcess.killServer(installation: installation, bottle: bottle)
+    }
+
+    /// The Wine installation a bottle should run with.
+    ///
+    /// Prefers the version recorded in the bottle's metadata (so a bottle stays
+    /// pinned to its Wine build when several are installed), falling back to the
+    /// runtime default when that version is unknown or no longer installed.
+    private func wineInstallation(for bottle: Bottle) throws -> WineInstallation {
+        let recorded = bottle.metadata.wineVersion
+        if !recorded.isEmpty, let installation = try? runtime.requireWine(version: recorded) {
+            return installation
+        }
+        return try runtime.requireWine()
     }
 
     private func applyWindowsVersion(
