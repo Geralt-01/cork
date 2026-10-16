@@ -19,13 +19,28 @@ contract for the "make Cork like CrossOver" effort.
 RecipeApp.swift        Frozen model for a catalog entry.
 AppCatalog.swift       Frozen AppCatalog protocol + CatalogQuery.
 CrossTieCatalog.swift  CrossTie (`crossover.tie`) XML catalog (frozen API).
-CrossTieParser.swift   Streaming c4p parser (owned by engine track).
-CompatDatabase.swift   Compatibility DB reader (owned by engine track).
+CrossTieParser.swift   Streaming c4p parser.
+CompatDatabase.swift   Compatibility DB reader (best-effort; opaque vendor format).
+Compat/                Recipe-medal rating fallback (`CompatRating`).
 CrossOverData.swift    Discovers user-supplied CrossOver files.
+InstallRecipe.swift    Install recipe/step model + `CrossTieInstallRecipes`.
+CrossTieInstallParser.swift  Recipe extraction (installer-id chains, CD media).
+AppInstaller.swift     `WineInstaller` — executes a recipe against a bottle.
+Installer/             Step planner, file operations, shortcut writer.
+AppBundler.swift       Builds a macOS `.app`; `Bundle/` holds launcher/icon/paths.
+Dependencies.swift     `DependencyManager` (winetricks-style components).
+Dependencies/          Component catalog + step planner.
+Associations.swift     `AssociationStore` (per-bottle file associations).
+Associations/          JSON store, registry commands, bundle document types.
+Diagnostics.swift      `Diagnostics` (`cxdiag`) + `CxFixes` (`cxfixes.xml`).
+Diagnostics/           Host/runtime/bottle checks + cxfixes discovery.
 ```
 
-Planned modules: `Installer/`, `Dependencies/`, `Bundle/`, `Associations/`,
-`Diagnostics/`.
+## CLI surface (`Sources/cork`)
+
+`runtime` (incl. `runtime wine list/install/select/clear`), `bottle`, `app`
+(`search`/`show`/`recipe`/`rating`), `install`, `bundle`, `deps`, `assoc`,
+`run`, `exec`, `doctor [--bottle]`.
 
 ## Frozen API contract
 
