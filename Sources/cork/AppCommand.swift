@@ -14,7 +14,7 @@ struct AppCommand: AsyncParsableCommand {
         commandName: "app",
         abstract: "Search and inspect applications in a recipe catalog.",
         discussion: "Reads a CrossTie-format catalog that you supply; Cork does not bundle CrossOver data.",
-        subcommands: [Search.self, Show.self]
+        subcommands: [Search.self, Show.self, Recipe.self]
     )
 
     struct Search: ParsableCommand {
@@ -92,6 +92,67 @@ struct AppCommand: AsyncParsableCommand {
     }
 
     /// Resolve the catalog path from an explicit option or CrossOver discovery.
+}
+
+/// Print the ordered install recipe (steps + reboot flag) for one app id.
+struct Recipe: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Show one application's install recipe (ordered steps).",
+        discussion: "Extracts installer steps from a CrossTie catalog that you supply; Cork does not bundle CrossOver data."
+    )
+
+    @Argument(help: "Application id, e.g. com.codeweavers.c4.4225")
+    var appID: String
+
+    @Option(name: .long, help: "Path to a CrossTie catalog. Defaults to a detected CrossOver install.")
+    var catalog: String?
+
+    func run() throws {
+        let url = try locateCatalog(explicit: catalog)
+        let recipes = try CrossTieInstallRecipes(fileURL: url)
+        guard let recipe = recipes.installRecipe(appID: appID) else {
+            throw ValidationError("No install recipe for '\(appID)' in \(url.lastPathComponent).")
+        }
+
+        print(Terminal.bold("Recipe for \(recipe.appID)"))
+        if recipe.steps.isEmpty {
+            print("  (no steps)")
+        }
+        for (index, step) in recipe.steps.enumerated() {
+            var line = "  \(index + 1). \(describe(step))"
+            if let note = step.description, !note.isEmpty {
+                line += Terminal.dim(" — \(note)")
+            }
+            print(line)
+        }
+        print(Terminal.bold("  requiresReboot: \(recipe.requiresReboot)"))
+        if !recipe.dllOverrides.isEmpty {
+            print("  dllOverrides:   \(recipe.dllOverrides.joined(separator: ", "))")
+        }
+    }
+
+    private func describe(_ step: InstallStep) -> String {
+        switch step.kind {
+        case .download:
+            return "download \(step.url ?? "?") → \(step.fileName ?? "?")"
+        case .setWindowsVersion:
+            return "setWindowsVersion \(step.windowsVersion ?? "?")"
+        case .copyFiles:
+            return "copyFiles \(step.source ?? "?") → \(step.destination ?? "?")"
+        case .registry:
+            return "registry \(step.registryKey ?? "?") \\ \(step.registryName ?? "?") = \(step.registryData ?? "")"
+        case .createShortcut:
+            return "createShortcut \(step.destination ?? "?") → \(step.source ?? "?")"
+        case .runInstaller, .runCommand:
+            var parts = [step.command ?? "?"]
+            if !step.arguments.isEmpty { parts.append(contentsOf: step.arguments) }
+            var line = "\(step.kind.rawValue) \(parts.joined(separator: " "))"
+            if !step.silentArguments.isEmpty {
+                line += " (silent: \(step.silentArguments.joined(separator: " ")))"
+            }
+            return line
+        }
+    }
 }
 
 /// Resolve a catalog path from an explicit option or CrossOver discovery.
