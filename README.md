@@ -175,6 +175,15 @@ Cork's performance depends on the game, your Mac (Apple Silicon), chosen backend
 | **Firewatch** | Story/Adventure | 60+ | Lightweight, runs flawlessly. |
 | **What Remains of Edith Finch** | Story/Adventure | 60+ | Beautiful and stable. |
 | **Oxenfree** | Story/Adventure | 60+ | Plays very well. |
+| **Disco Elysium** | RPG/Story | 40–60 | Great writing; runs well with DXMT. |
+| **Baldur's Gate 3** | CRPG/Story AAA | 25–50 | Playable on high-end Apple Silicon; needs tuning (DXMT). Very heavy. |
+| **Divinity: Original Sin 2** | CRPG/Story AAA | 30–60 | Often runs well with proper backend/settings. |
+| **Cyberpunk 2077** | RPG/Story AAA | 20–40 | Technically runs in places; playable on M3+ with DXMT, expect compromises. |
+| **Dragon Age: Origins** | CRPG/Story | 40–60 | Stable, classic. |
+| **Mass Effect 2** | RPG/Story | 30–60 | Often runs well with Wine/DXMT. |
+| **Mass Effect 3** | RPG/Story | 30–60 | Usually playable. |
+| **The Witcher 2: Assassins of Kings** | RPG/Story | 30–50 | Playable with tweaks. |
+| **The Witcher 3: Wild Hunt** | RPG/Story AAA | 20–40 | Playable on higher-end Apple Silicon (DXMT); heavy but doable. |
 | **Borderlands 2** | FPS/RPG | 40–80 | Playable with DXMT on Apple Silicon. |
 
 *Anti-cheat games (EAC/BattlEye/Vanguard) often refuse to launch online under Wine on macOS. Cork surfaces honest errors rather than faking it.*
