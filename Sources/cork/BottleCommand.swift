@@ -20,7 +20,7 @@ struct BottleCommand: AsyncParsableCommand {
         @Option(name: .long, help: "Graphics backend: wined3d, dxvk, or dxmt.")
         var backend: String?
 
-        @Option(name: .long, help: "Reported Windows version: win7, win8, win81, win10.")
+        @Option(name: .long, help: "Reported Windows version (e.g. win10, win7, winxp, win2000, win98).")
         var windows: String?
 
         @Flag(name: .long, help: "Replace an existing bottle with the same name.")

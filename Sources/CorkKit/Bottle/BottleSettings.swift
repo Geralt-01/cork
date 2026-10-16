@@ -47,7 +47,7 @@ public struct BottleSettings: Codable, Sendable, Equatable {
         }
         switch key {
         case .windows:
-            guard let version = WindowsVersion(rawValue: value.lowercased()) else {
+            guard let version = WindowsVersion(catalogValue: value) else {
                 throw CorkError.invalidSetting("windows must be one of \(WindowsVersion.allCases.map(\.rawValue).joined(separator: ", "))")
             }
             windowsVersion = version

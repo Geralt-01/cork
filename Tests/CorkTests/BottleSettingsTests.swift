@@ -50,6 +50,33 @@ func bottleSettingsTests() -> [TestCase] {
             try expectEqual(WindowsVersion.win7.registryVersion, "6.1")
             try expectEqual(WindowsVersion.win81.registryBuild, "9600")
         }),
+        TestCase(name: "supportsLegacyWindowsVersions", body: {
+            // Versions the real CrossTie catalog asks for.
+            try expect(WindowsVersion(catalogValue: "winxp") == .winxp)
+            try expect(WindowsVersion(catalogValue: "win2000") == .win2000)
+            try expect(WindowsVersion(catalogValue: "winvista") == .winvista)
+            try expect(WindowsVersion(catalogValue: "nt40") == .nt40)
+            try expect(WindowsVersion(catalogValue: "win98") == .win98)
+            try expect(WindowsVersion(catalogValue: "win2003") == .win2003)
+            // Aliases and case-insensitivity.
+            try expect(WindowsVersion(catalogValue: "WinXP") == .winxp)
+            try expect(WindowsVersion(catalogValue: "win2k") == .win2000)
+            try expect(WindowsVersion(catalogValue: "Vista") == .winvista)
+            // Unknown values are still rejected.
+            try expect(WindowsVersion(catalogValue: "nonsense") == nil)
+            try expect(WindowsVersion(catalogValue: "windows95") == nil)
+
+            try expectEqual(WindowsVersion.winxp.registryVersion, "5.1")
+            try expectEqual(WindowsVersion.winxp.registryBuild, "2600")
+            try expectEqual(WindowsVersion.win2000.registryVersion, "5.0")
+            try expectEqual(WindowsVersion.winvista.registryVersion, "6.0")
+
+            var settings = BottleSettings()
+            try settings.apply(key: "windows", value: "winxp")
+            try expect(settings.windowsVersion == .winxp)
+            try settings.apply(key: "windows", value: "vista")
+            try expect(settings.windowsVersion == .winvista)
+        }),
         TestCase(name: "backendFromName", body: {
             try expect(GraphicsBackend(rawValue: "dxmt") == .dxmt)
             try expect(GraphicsBackend(rawValue: "dxvk") == .dxvk)
