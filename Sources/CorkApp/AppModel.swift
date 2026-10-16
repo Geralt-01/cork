@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
         case bottles
         case applications
         case files
+        case dependencies
+        case diagnostics
 
         var id: String { rawValue }
 
@@ -28,6 +30,8 @@ final class AppModel: ObservableObject {
             case .bottles: return "Bottles"
             case .applications: return "Applications"
             case .files: return "Bottle Files"
+            case .dependencies: return "Dependencies"
+            case .diagnostics: return "Diagnostics"
             }
         }
 
@@ -36,6 +40,8 @@ final class AppModel: ObservableObject {
             case .bottles: return "shippingbox"
             case .applications: return "square.grid.2x2"
             case .files: return "folder"
+            case .dependencies: return "puzzlepiece.extension"
+            case .diagnostics: return "stethoscope"
             }
         }
     }
@@ -132,6 +138,46 @@ final class AppModel: ObservableObject {
     @Published var bundledAppURL: URL?
     @Published var bundleError: String?
 
+    // MARK: Dependencies
+
+    /// Every component Cork can install, sorted by id.
+    @Published var dependencyComponents: [DependencyComponent] = []
+    /// Component ids whose recipe can only be completed manually.
+    @Published var dependencyManualIDs: Set<String> = []
+    @Published var dependencySearchText = ""
+    @Published var selectedDependencyCategory: String?
+    @Published var selectedDependencyID: String?
+
+    /// Install sheet state for a dependency component.
+    @Published var showDependencyInstallSheet = false
+    @Published var dependencyInstallComponentID = ""
+    @Published var dependencyInstallComponentName = ""
+    @Published var dependencyInstallBottle: String?
+    @Published var dependencyInstallLog: [String] = []
+    @Published var isInstallingDependency = false
+    @Published var dependencyInstallOutcome: InstallOutcome = .running
+
+    // MARK: Diagnostics
+
+    @Published var diagnosticReport: DiagnosticReport?
+    @Published var diagnosticBottle: String?
+    @Published var isRunningDiagnostics = false
+    @Published var selectedDiagnosticCheckID: String?
+
+    // MARK: File associations
+
+    @Published var associations: [AssociationEntry] = []
+    @Published var associationsBottleName: String?
+    @Published var associationsRegistryLines: [String] = []
+    @Published var showAssociationsRegistry = false
+
+    /// Add-association sheet state.
+    @Published var showAssociationSheet = false
+    @Published var associationFormExtension = ""
+    @Published var associationFormExecutable = ""
+    @Published var associationFormProgID = ""
+    @Published var associationFormFriendlyName = ""
+
     // MARK: Alerts
 
     @Published var alert: AppAlert?
@@ -168,6 +214,38 @@ final class AppModel: ObservableObject {
 
     var catalogIsEmpty: Bool { (catalog?.appCount ?? 0) == 0 }
 
+    /// Distinct categories across the dependency catalog, sorted.
+    var dependencyCategories: [String] {
+        Array(Set(dependencyComponents.map(\.category))).sorted()
+    }
+
+    /// The dependency catalog narrowed by the current search text and category.
+    var filteredDependencyComponents: [DependencyComponent] {
+        let query = dependencySearchText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return dependencyComponents.filter { component in
+            if let category = selectedDependencyCategory,
+               component.category.caseInsensitiveCompare(category) != .orderedSame {
+                return false
+            }
+            guard !query.isEmpty else { return true }
+            if component.id.lowercased().contains(query) { return true }
+            if component.name.lowercased().contains(query) { return true }
+            if let summary = component.summary, summary.lowercased().contains(query) { return true }
+            return false
+        }
+    }
+
+    var selectedDependency: DependencyComponent? {
+        dependencyComponents.first { $0.id == selectedDependencyID }
+    }
+
+    /// True when the selected component's recipe contains a manual step.
+    func dependencyRequiresManual(_ id: String) -> Bool {
+        dependencyManualIDs.contains(id)
+    }
+
     // MARK: Errors
 
     static func describe(_ error: Error) -> String {
@@ -201,6 +279,12 @@ final class AppModel: ObservableObject {
         case .files:
             refreshBottles()
             refreshBrowser()
+        case .dependencies:
+            refreshBottles()
+            loadDependencies()
+        case .diagnostics:
+            refreshBottles()
+            runDiagnostics()
         }
     }
 
@@ -901,5 +985,270 @@ final class AppModel: ObservableObject {
 
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: Dependencies
+
+    /// Loads the built-in dependency catalog off the main thread and records
+    /// which components can only be finished manually.
+    func loadDependencies() {
+        let manager = DependencyManager(paths: paths)
+        Task {
+            let result = await Task.detached { () -> ([DependencyComponent], Set<String>) in
+                let components = manager.components()
+                var manual: Set<String> = []
+                for component in components {
+                    guard let definition = manager.definition(id: component.id) else { continue }
+                    if definition.steps.contains(where: { step in
+                        if case .manual = step { return true }
+                        return false
+                    }) {
+                        manual.insert(component.id)
+                    }
+                }
+                return (components, manual)
+            }.value
+
+            self.dependencyComponents = result.0
+            self.dependencyManualIDs = result.1
+            if let current = self.selectedDependencyID,
+               result.0.contains(where: { $0.id == current }) {
+                // Keep the current selection.
+            } else {
+                self.selectedDependencyID = self.filteredDependencyComponents.first?.id
+                    ?? result.0.first?.id
+            }
+        }
+    }
+
+    /// Opens the install sheet for a component, defaulting to the current bottle.
+    func requestInstallDependency(_ component: DependencyComponent) {
+        dependencyInstallComponentID = component.id
+        dependencyInstallComponentName = component.name
+        dependencyInstallBottle = selectedBottleName ?? bottles.first?.name
+        dependencyInstallLog = []
+        isInstallingDependency = false
+        dependencyInstallOutcome = .running
+        showDependencyInstallSheet = true
+    }
+
+    var dependencyInstallTargetIsValid: Bool {
+        guard let name = dependencyInstallBottle else { return false }
+        return bottles.contains { $0.name == name }
+    }
+
+    /// Runs a dependency install on a background task, streaming `InstallEvent`s
+    /// into the live log. Never blocks the UI thread.
+    func startDependencyInstall() {
+        guard let targetBottle = dependencyInstallBottle, !targetBottle.isEmpty else {
+            dependencyInstallOutcome = .failed
+            appendDependencyLog("Choose a target bottle first.")
+            return
+        }
+        let componentID = dependencyInstallComponentID
+        isInstallingDependency = true
+        dependencyInstallOutcome = .running
+        dependencyInstallLog = []
+        appendDependencyLog("Installing “\(dependencyInstallComponentName)” into “\(targetBottle)”…")
+
+        let manager = DependencyManager(paths: paths)
+        Task {
+            defer { self.isInstallingDependency = false }
+            do {
+                try await Task.detached {
+                    try await manager.install(
+                        componentID: componentID,
+                        into: targetBottle
+                    ) { event in
+                        Task { @MainActor in self.appendDependencyLog(Self.describe(event)) }
+                    }
+                }.value
+                self.appendDependencyLog("Done — “\(self.dependencyInstallComponentName)” finished installing.")
+                self.dependencyInstallOutcome = .succeeded
+                self.refreshBottles()
+            } catch {
+                let message = Self.describe(error)
+                self.appendDependencyLog("Failed: \(message)")
+                self.dependencyInstallOutcome = .failed
+            }
+        }
+    }
+
+    func appendDependencyLog(_ line: String) {
+        dependencyInstallLog.append(line)
+    }
+
+    func closeDependencyInstallSheet() {
+        guard !isInstallingDependency else { return }
+        showDependencyInstallSheet = false
+    }
+
+    // MARK: Diagnostics
+
+    /// Runs the diagnostic engine for the currently selected bottle (or the host
+    /// when "System" is chosen) off the main thread.
+    func runDiagnostics() {
+        isRunningDiagnostics = true
+        let bottle = diagnosticBottle
+        let diagnostics = Diagnostics(paths: paths)
+        Task {
+            let report = await Task.detached { () -> DiagnosticReport? in
+                try? diagnostics.run(bottle: bottle)
+            }.value
+            self.diagnosticReport = report
+            self.isRunningDiagnostics = false
+            if let current = self.selectedDiagnosticCheckID,
+               report?.checks.contains(where: { $0.id == current }) == true {
+                // Keep the current selection.
+            } else {
+                self.selectedDiagnosticCheckID = report?.checks.first?.id
+            }
+        }
+    }
+
+    /// Human-readable label for the diagnostics target picker.
+    var diagnosticTargetLabel: String {
+        diagnosticBottle ?? "System"
+    }
+
+    var selectedDiagnosticCheck: DiagnosticCheck? {
+        diagnosticReport?.checks.first { $0.id == selectedDiagnosticCheckID }
+    }
+
+    // MARK: File associations
+
+    /// Loads the associations for a bottle, preparing the current selection.
+    func loadAssociations(bottleName: String?) {
+        associationsBottleName = bottleName
+        associationsRegistryLines = []
+        showAssociationsRegistry = false
+        guard let bottleName else {
+            associations = []
+            return
+        }
+        let store = AssociationStore(paths: paths)
+        Task {
+            let entries = await Task.detached { () -> [AssociationEntry] in
+                (try? store.read(bottle: bottleName)) ?? []
+            }.value
+            guard self.associationsBottleName == bottleName else { return }
+            self.associations = entries
+        }
+    }
+
+    /// Ensures associations are loaded for the detail pane's bottle.
+    func ensureAssociationsLoaded(for bottleName: String) {
+        if associationsBottleName != bottleName {
+            loadAssociations(bottleName: bottleName)
+        }
+    }
+
+    /// Opens the add-association form for a bottle.
+    func requestAddAssociation(bottleName: String) {
+        associationFormExtension = ""
+        associationFormExecutable = ""
+        associationFormProgID = ""
+        associationFormFriendlyName = ""
+        associationsBottleName = bottleName
+        showAssociationSheet = true
+    }
+
+    /// True when the add-association form has enough to attempt a write.
+    var associationFormIsValid: Bool {
+        let ext = Self.normalizedExtension(associationFormExtension)
+        let executable = associationFormExecutable.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !ext.isEmpty && !executable.isEmpty
+    }
+
+    /// Canonicalises a user-typed extension the way CorkEngine does: trimmed,
+    /// lowercased, single leading dot. Empty when nothing usable remains.
+    static func normalizedExtension(_ raw: String) -> String {
+        var ext = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while ext.hasPrefix(".") { ext.removeFirst() }
+        return ext.isEmpty ? "" : "." + ext
+    }
+
+    /// Persists the form as a new association and reloads the list.
+    func addAssociation() {
+        guard let bottleName = associationsBottleName else {
+            present(CorkError.bottleNotFound(name: ""), title: "Cannot add association")
+            return
+        }
+        guard associationFormIsValid else { return }
+
+        let paths = self.paths
+        let trimmedProgID = associationFormProgID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let friendly = associationFormFriendlyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entry = AssociationEntry(
+            fileExtension: associationFormExtension,
+            progID: trimmedProgID.isEmpty
+                ? Self.generatedProgID(executable: associationFormExecutable)
+                : trimmedProgID,
+            friendlyName: friendly.isEmpty ? nil : friendly,
+            executable: associationFormExecutable.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        applyAssociationChange(bottleName: bottleName, title: "Could not add association") {
+            try AssociationStore(paths: paths).set(entry, bottle: bottleName)
+        }
+        showAssociationSheet = false
+    }
+
+    func removeAssociation(fileExtension: String) {
+        guard let bottleName = associationsBottleName else { return }
+        let paths = self.paths
+        applyAssociationChange(bottleName: bottleName, title: "Could not remove association") {
+            try AssociationStore(paths: paths).remove(fileExtension: fileExtension, bottle: bottleName)
+        }
+    }
+
+    /// Loads (or hides) the registry command lines for the current bottle.
+    func toggleAssociationsRegistry() {
+        guard let bottleName = associationsBottleName else { return }
+        if showAssociationsRegistry {
+            showAssociationsRegistry = false
+            associationsRegistryLines = []
+            return
+        }
+        let store = AssociationStore(paths: paths)
+        Task {
+            let lines = await Task.detached { () -> [String] in
+                (try? store.registryCommandLines(bottle: bottleName)) ?? []
+            }.value
+            guard self.associationsBottleName == bottleName else { return }
+            self.associationsRegistryLines = lines
+            self.showAssociationsRegistry = true
+        }
+    }
+
+    /// Runs a mutating association operation off the main thread, reloading the
+    /// list afterwards or reporting the error through the alert mechanism.
+    private func applyAssociationChange(
+        bottleName: String,
+        title: String,
+        _ operation: @escaping @Sendable () throws -> Void
+    ) {
+        let box = UncheckedSendable(operation)
+        Task {
+            do {
+                try await Task.detached { try box.value() }.value
+                self.loadAssociations(bottleName: bottleName)
+            } catch {
+                self.present(error, title: title)
+            }
+        }
+    }
+
+    /// Builds a stable ProgID from the program name, mirroring the CLI's rule.
+    static func generatedProgID(executable: String) -> String {
+        let normalized = executable
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base = (normalized as NSString).lastPathComponent
+        let stem = (base as NSString).deletingPathExtension
+        let name = stem.unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+        return "Cork\(name.isEmpty ? "App" : name)"
     }
 }

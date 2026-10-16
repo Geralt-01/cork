@@ -107,6 +107,8 @@ struct BottleDetailView: View {
                     .disabled(bottle.latestLogFile() == nil)
                 }
             }
+
+            AssociationsSection(bottle: bottle)
         }
         .formStyle(.grouped)
         .navigationTitle(bottle.name)
