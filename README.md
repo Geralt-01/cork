@@ -37,9 +37,22 @@ swift build -c release
 .build/release/cork --help
 ```
 
-Put the binary on your `PATH` or use the full path.
+Put the binary on your `PATH` (or use the full path to `.build/release/cork`).
+For example, if Homebrew's `bin` directory is on your `PATH`:
+
+```sh
+ln -sf "$PWD/.build/release/cork" /opt/homebrew/bin/cork
+```
+
+or add the build directory to your shell profile (`~/.zshrc`):
+
+```sh
+export PATH="$PWD/.build/release:$PATH"
+```
 
 ## Quick start
+
+> New here? See the full **[Getting Started guide](docs/GETTING-STARTED.md)**.
 
 ```sh
 # 1. Download and verify the runtime (Wine + graphics components)
@@ -83,12 +96,26 @@ cork doctor
 | `cork bottle list` | List bottles |
 | `cork bottle info <name>` | Show a bottle's settings |
 | `cork bottle set <name> key=value…` | Change settings |
-| `cork bottle logs <name> [--path]` | Show (or print the path to) a bottle's latest log |
+| `cork bottle logs <name> [--path-only]` | Show (or print the path to) a bottle's latest log |
 | `cork bottle kill <name>` | Stop all processes in a bottle |
 | `cork bottle delete <name> [--yes]` | Delete a bottle |
 | `cork run <bottle> <exe> [--detach] [-- args…]` | Run a Windows program |
 | `cork exec <bottle> <command> [args…]` | Run a Wine built-in (cmd, winecfg, reg, …) |
-| `cork doctor` | Check the environment |
+| `cork app search <query>` | Search the app catalog |
+| `cork app show <appid>` | Show a catalog app |
+| `cork app recipe <appid>` | Show an app's install recipe |
+| `cork app rating <appid>` | Show an app's compatibility rating |
+| `cork install <bottle> <appid> [--catalog <file>] [--yes]` | Install a catalog app into a bottle |
+| `cork deps list [--category <c>]` | List dependency components |
+| `cork deps install <bottle> <component>` | Install a dependency (vcrun, d3dx9, …) |
+| `cork assoc list <bottle>` | List file associations |
+| `cork assoc set <bottle> <ext> <exe> [--name <label>]` | Add a file association |
+| `cork assoc remove <bottle> <ext>` | Remove a file association |
+| `cork bundle <bottle> <exe> [--name <n>] [--to <dir>] [--icon <file>]` | Make a double-clickable `.app` |
+| `cork runtime wine list` | List Wine versions and install state |
+| `cork runtime wine install <version>` | Install a Wine version |
+| `cork runtime wine select <version>` | Select the default Wine version |
+| `cork doctor [--bottle <name>]` | Check the environment |
 
 ## How it works
 

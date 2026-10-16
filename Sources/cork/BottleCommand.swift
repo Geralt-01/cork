@@ -209,7 +209,7 @@ struct BottleCommand: AsyncParsableCommand {
 
         @Argument(help: "Name of the bottle.") var name: String
 
-        @Option(name: .long, help: "Only print the path to the log file.")
+        @Flag(name: .long, help: "Only print the path to the log file.")
         var pathOnly = false
 
         func run() throws {
