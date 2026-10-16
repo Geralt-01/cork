@@ -34,20 +34,107 @@ public struct RuntimeManager {
         return store.isInstalled(component)
     }
 
+    /// Version of the manifest's default Wine component, if any.
+    public var defaultWineVersion: String? {
+        manifest.defaultWineComponent?.version
+    }
+
+    /// Version the user has explicitly selected, if any.
+    public var selectedWineVersion: String? {
+        store.selectedWineVersion()
+    }
+
+    /// Versions of every Wine component currently installed, in manifest order.
+    public func installedWineVersions() -> [String] {
+        manifest.wineComponents
+            .filter { store.isInstalled($0) }
+            .map(\.version)
+    }
+
+    /// Whether a specific Wine version is installed.
+    public func isWineInstalled(version: String) -> Bool {
+        guard let component = manifest.wineComponent(forVersion: version) else { return false }
+        return store.isInstalled(component)
+    }
+
+    /// Resolves which Wine component should be used.
+    ///
+    /// - With an explicit `version`, that component (or `nil` when unknown).
+    /// - Otherwise the selected version when it is installed, falling back to
+    ///   the manifest default. This keeps the pre-existing single-runtime
+    ///   behaviour intact when no selection has been made.
+    public func resolvedWineComponent(version: String? = nil) -> RuntimeManifest.Component? {
+        if let version, !version.isEmpty {
+            return manifest.wineComponent(forVersion: version)
+        }
+        if let selected = store.selectedWineVersion(),
+           let match = manifest.wineComponent(forVersion: selected),
+           store.isInstalled(match) {
+            return match
+        }
+        return manifest.defaultWineComponent
+    }
+
     public var isWineReady: Bool {
-        guard let wine = manifest.wineComponent else { return false }
+        guard let wine = resolvedWineComponent() else { return false }
         return store.isInstalled(wine)
     }
 
-    public func requireWine() throws -> WineInstallation {
-        guard let wine = manifest.wineComponent else {
+    /// Returns the installation for the resolved (or explicit) Wine version.
+    ///
+    /// The default argument preserves the historical `requireWine()` call sites.
+    public func requireWine(version: String? = nil) throws -> WineInstallation {
+        let resolved = resolvedWineComponent(version: version)
+        if let version, !version.isEmpty, resolved == nil {
+            throw CorkError.componentUnknown(id: version)
+        }
+        guard let wine = resolved else {
             throw CorkError.manifestInvalid("manifest has no wine component")
         }
         guard store.isInstalled(wine) else {
             throw CorkError.runtimeNotInstalled
         }
-        let directory = paths.componentDirectory(id: wine.id, version: wine.version)
+        let directory = componentDirectory(wine)
         return try WineInstallation.detect(in: directory)
+    }
+
+    /// Persists the selected Wine version. The version must exist in the
+    /// manifest and be installed.
+    public func selectWineVersion(_ version: String) throws {
+        guard let component = manifest.wineComponent(forVersion: version) else {
+            throw CorkError.componentUnknown(id: version)
+        }
+        guard store.isInstalled(component) else {
+            throw CorkError.componentNotInstalled(id: component.id, version: component.version)
+        }
+        try store.setSelectedWineVersion(component.version)
+    }
+
+    /// Clears the explicit selection, restoring the manifest default.
+    public func clearWineSelection() throws {
+        try store.clearSelectedWineVersion()
+    }
+
+    /// Installs a specific Wine version from the manifest.
+    public func installWine(
+        version: String,
+        force: Bool = false,
+        onEvent: @escaping @Sendable (RuntimeInstallEvent) -> Void = { _ in },
+        onDownloadProgress: @escaping @Sendable (String, DownloadProgress) -> Void = { _, _ in }
+    ) async throws {
+        guard let component = manifest.wineComponent(forVersion: version) else {
+            throw CorkError.componentUnknown(id: version)
+        }
+        try paths.createDirectories()
+        if !force, store.isInstalled(component) {
+            onEvent(.alreadyInstalled(id: component.id))
+            return
+        }
+        try await installComponent(
+            component,
+            onEvent: onEvent,
+            onDownloadProgress: onDownloadProgress
+        )
     }
 
     public func componentDirectory(_ component: RuntimeManifest.Component) -> URL {
@@ -166,6 +253,15 @@ public struct RuntimeManager {
     public func uninstall(componentIDs: [String]) throws {
         for component in try resolveTargets(componentIDs) {
             try store.remove(component)
+        }
+        // Clear the selection if the currently selected Wine version is no longer
+        // installed.
+        if let selected = store.selectedWineVersion() {
+            let stillInstalled = manifest.wineComponent(forVersion: selected)
+                .map { store.isInstalled($0) } ?? false
+            if !stillInstalled {
+                try? store.clearSelectedWineVersion()
+            }
         }
     }
 }
