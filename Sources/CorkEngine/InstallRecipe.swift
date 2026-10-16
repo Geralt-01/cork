@@ -107,17 +107,56 @@ public protocol InstallRecipeProviding: Sendable {
 
 /// Extracts install recipes from a user-supplied CrossTie catalog.
 ///
-/// TODO(install-a): implement step extraction from `<installprofile>` /
-/// `<preinstallregistry>` / `<filestocopy>` / `<lnkfile>` / `<downloadurl>`.
+/// The catalog is streamed once, at initialization, into a compact index of
+/// install-relevant fields (see `CrossTieInstallParser`). Recipes are then built
+/// on demand, so repeated lookups are cheap and memory stays bounded.
 public struct CrossTieInstallRecipes: InstallRecipeProviding {
     public let fileURL: URL
+    private let index: CrossTieInstallIndex
 
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
+        self.index = try CrossTieInstallParser.parse(fileURL: fileURL)
     }
 
+    /// The install recipe for `appID`, or `nil` when the catalog has no install
+    /// content for it (metadata-only apps, unknown ids, self-closing profiles).
     public func installRecipe(appID: String) -> InstallRecipe? {
-        _ = appID
-        return nil
+        buildRecipe(appID: appID, visited: [])
+    }
+
+    private func buildRecipe(appID: String, visited: Set<String>) -> InstallRecipe? {
+        guard !visited.contains(appID), let record = index.record(for: appID) else { return nil }
+        var visited = visited
+        visited.insert(appID)
+
+        var steps = record.installSteps()
+        var requiresReboot = record.requiresReboot
+        var dllOverrides = record.dllOverrides
+
+        // `<installerid>` points at another app whose recipe provides the
+        // installer (e.g. Microsoft Word 2000 → Microsoft Office 2000). Only
+        // follow it when this app has no installer/download of its own; its own
+        // tweaks (registry, DLL overrides) are kept ahead of the referenced steps.
+        let hasOwnInstaller = steps.contains { $0.kind == .runInstaller || $0.kind == .download }
+        if !hasOwnInstaller {
+            for installerID in record.installerIDs where installerID != appID {
+                guard let referenced = buildRecipe(appID: installerID, visited: visited) else { continue }
+                steps.append(contentsOf: referenced.steps)
+                requiresReboot = requiresReboot || referenced.requiresReboot
+                for override in referenced.dllOverrides where !dllOverrides.contains(override) {
+                    dllOverrides.append(override)
+                }
+                break
+            }
+        }
+
+        guard !steps.isEmpty || requiresReboot || !dllOverrides.isEmpty else { return nil }
+        return InstallRecipe(
+            appID: appID,
+            steps: steps,
+            requiresReboot: requiresReboot,
+            dllOverrides: dllOverrides
+        )
     }
 }
