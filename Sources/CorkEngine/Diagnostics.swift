@@ -9,6 +9,21 @@ public enum DiagnosticStatus: String, Sendable, Hashable, Codable {
     case skipped
 }
 
+public extension DiagnosticStatus {
+    /// Single-character indicator used by the CLI (and asserted by tests).
+    var symbol: String {
+        switch self {
+        case .pass: return "✓"
+        case .warn: return "!"
+        case .fail: return "✗"
+        case .skipped: return "–"
+        }
+    }
+
+    /// `true` only for checks that should fail the process exit code.
+    var isFailure: Bool { self == .fail }
+}
+
 /// A single diagnostic finding.
 ///
 /// NOTE: frozen CorkEngine API surface.
@@ -39,10 +54,18 @@ public struct DiagnosticReport: Sendable, Hashable, Codable {
     public var hasFailures: Bool { checks.contains { $0.status == .fail } }
 }
 
-/// Environment/bottle diagnostics.
-///
-/// TODO(diag): implement checks (arch, Rosetta, runtime integrity, bottles,
-/// graphics backend, disk, screen, Java/GPU) for a bottle or the system.
+public extension DiagnosticReport {
+    /// The first check with the given id, if any. Handy for callers and tests.
+    func check(id: String) -> DiagnosticCheck? { checks.first { $0.id == id } }
+
+    /// Checks that would fail the process exit code.
+    var failures: [DiagnosticCheck] { checks.filter { $0.status == .fail } }
+
+    /// Checks that need attention but are not fatal.
+    var warnings: [DiagnosticCheck] { checks.filter { $0.status == .warn } }
+}
+
+/// Environment/bottle diagnostics (CrossOver's `cxdiag` equivalent).
 public struct Diagnostics: Sendable {
     public let paths: CorkPaths
 
@@ -50,15 +73,57 @@ public struct Diagnostics: Sendable {
         self.paths = paths
     }
 
+    /// Run every applicable check. `bottle`, when supplied, adds per-bottle
+    /// checks. This never throws for a missing bottle (that is reported as a
+    /// `fail` check); the `throws` signature is part of the frozen API.
     public func run(bottle: String? = nil) throws -> DiagnosticReport {
-        _ = bottle
-        return DiagnosticReport(checks: [], bottle: bottle)
+        var checks: [DiagnosticCheck] = []
+        checks.append(contentsOf: HostChecks.checks())
+        checks.append(contentsOf: RuntimeChecks.checks(paths: paths))
+        if let bottle, !bottle.isEmpty {
+            checks.append(contentsOf: BottleChecks.checks(named: bottle, paths: paths))
+        }
+        return DiagnosticReport(checks: checks, bottle: bottle)
+    }
+}
+
+public extension Diagnostics {
+    /// Host CPU architecture as reported by `uname(2).machine`
+    /// (`"arm64"`, `"x86_64"`, …). Returns `"unknown"` if it cannot be read.
+    static func hostArchitecture() -> String {
+        var info = utsname()
+        guard uname(&info) == 0 else { return "unknown" }
+        return withUnsafePointer(to: &info.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
     }
 }
 
 /// Reads CrossOver's `cxfixes.xml` *when the user supplies one* (never bundled).
 ///
-/// TODO(diag): parse version-specific fixes, or return an empty list.
+/// ## Schema notes (observed 2026-10 on CrossOver's shipped `cxfixes.xml`)
+///
+/// The file is a **host-system** fix catalog, not an application database. Its
+/// shape is:
+///
+/// ```xml
+/// <cxfixes release="…">
+///   <distributions>…</distributions>
+///   <cxproducts>…</cxproducts>
+///   <fixes>
+///     <fix id="pygi" title="…" description="…">
+///       <cx id="cx19" level="required"/>
+///       <fixfor distribution="arch"><package name="python-gobject"/></fixfor>
+///     </fix>
+///     …
+///   </fixes>
+/// </cxfixes>
+/// ```
+///
+/// There is **no per-application association** in the real file, so ``fixes(appID:)``
+/// is keyed by the `<fix>`'s stable `id` (falling back to its `title`). Each
+/// value is the human-readable description, falling back to the title. Files
+/// whose schema cannot be recognised yield an empty map and never throw.
 public struct CxFixes: Sendable {
     public let fileURL: URL
     private let fixesByApp: [String: [String]]
@@ -71,11 +136,17 @@ public struct CxFixes: Sendable {
     public var fixCount: Int { fixesByApp.values.reduce(0) { $0 + $1.count } }
 
     public func fixes(appID: String) -> [String] { fixesByApp[appID] ?? [] }
+
+    /// Every fix key, sorted, for display/debugging.
+    public var fixIDs: [String] { fixesByApp.keys.sorted() }
 }
 
 public enum CxFixesParser {
+    /// Best-effort parse of a user-supplied `cxfixes.xml`.
+    ///
+    /// Never throws for malformed or unrecognised data: an unreadable file, a
+    /// non-`cxfixes` root, or a file with no `<fix>` records all return `[:]`.
     public static func parse(fileURL: URL) throws -> [String: [String]] {
-        _ = fileURL
-        return [:]
+        CxFixesSAX.parse(fileURL: fileURL)
     }
 }
