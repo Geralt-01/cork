@@ -50,12 +50,24 @@ struct CrossTieShortcut: Sendable, Hashable {
     var arguments: [String]
 }
 
-/// A pre/post-install environment variable. There is no `InstallStep` field for
-/// these, so they are surfaced in the run-installer step's `description`.
+/// A pre/post-install environment variable, surfaced on the run-installer
+/// step's `environment` dictionary.
 struct CrossTieEnvironment: Sendable, Hashable {
     var isPreInstall: Bool
     var name: String
     var value: String
+}
+
+/// An `<installprofile appid="…">` block whose `appid` differs from the host
+/// app. These are *not* the host's own profile: they carry installer globs for
+/// a prerequisite/component that ships on the same media. For example the
+/// Office 2000 CD profile carries `<localinstallerglob>SP/DCOM*/DCOM95.exe`, a
+/// component installer for `com.codeweavers.c4.6936` — which must not be
+/// mistaken for Office's own setup executable.
+struct CrossTieEmbeddedProfile: Sendable, Hashable {
+    var appID: String
+    var installerGlobs: [String] = []
+    var localInstallerGlobs: [String] = []
 }
 
 /// All install-relevant data extracted for one `appid`.
@@ -90,6 +102,7 @@ struct CrossTieInstallRecord: Sendable {
     var requiresReboot = false
     var hasRebootDirective = false
     var embeddedProfileAppIDs: [String] = []      // `<installprofile appid="…">`
+    var embeddedProfiles: [CrossTieEmbeddedProfile] = []
 
     // `<cdprofile>`
     var cdGlobs: [String] = []
@@ -120,6 +133,7 @@ struct CrossTieInstallRecord: Sendable {
         Self.appendUnique(&cdGlobs, other.cdGlobs)
         Self.appendUnique(&predependencies, other.predependencies)
         Self.appendUnique(&embeddedProfileAppIDs, other.embeddedProfileAppIDs)
+        Self.appendUnique(&embeddedProfiles, other.embeddedProfiles)
         Self.appendUnique(&registries, other.registries)
         Self.appendUnique(&fileCopies, other.fileCopies)
         Self.appendUnique(&shortcuts, other.shortcuts)
@@ -132,6 +146,28 @@ struct CrossTieInstallRecord: Sendable {
 
     private static func appendUnique<T: Equatable>(_ target: inout [T], _ values: [T]) {
         for value in values where !target.contains(value) { target.append(value) }
+    }
+
+    /// Record an `<installerglob>` / `<localinstallerglob>` that belongs to an
+    /// `<installprofile appid="appID">` block rather than the host app.
+    mutating func addEmbeddedGlob(appID: String, value: String, isLocal: Bool) {
+        if let index = embeddedProfiles.firstIndex(where: { $0.appID == appID }) {
+            if isLocal {
+                if !embeddedProfiles[index].localInstallerGlobs.contains(value) {
+                    embeddedProfiles[index].localInstallerGlobs.append(value)
+                }
+            } else if !embeddedProfiles[index].installerGlobs.contains(value) {
+                embeddedProfiles[index].installerGlobs.append(value)
+            }
+        } else {
+            var profile = CrossTieEmbeddedProfile(appID: appID)
+            if isLocal {
+                profile.localInstallerGlobs = [value]
+            } else {
+                profile.installerGlobs = [value]
+            }
+            embeddedProfiles.append(profile)
+        }
     }
 }
 
@@ -171,36 +207,23 @@ enum CrossTieInstallParser {
 
 extension CrossTieInstallRecord {
     /// Ordered steps for this record. The order mirrors what an install needs:
-    /// download → set Windows version → pre-install registry → run installer →
-    /// post-install registry → copy files → create shortcuts.
+    /// download → set Windows version → pre-install registry → component
+    /// installers → run installer → post-install registry → copy files →
+    /// create shortcuts.
     ///
-    /// Elements that have no `InstallStep` field (dependencies, environment,
-    /// self-extract flags, CD globs, post-install URLs, embedded profiles) are
-    /// recorded in the run-installer step's `description`, or in the first step
-    /// when there is no run-installer step.
+    /// Metadata with no dedicated `InstallStep` field (self-extract flags,
+    /// post-install URLs, embedded profiles) is recorded in the run-installer
+    /// step's `description`, or in the first step when there is no
+    /// run-installer step. Environment variables and `<predependency>` are now
+    /// surfaced as first-class fields.
     func installSteps() -> [InstallStep] {
         var steps: [InstallStep] = []
 
+        let mediaMarker = cdGlobs.first
+        let environment = installerEnvironment()
+
         // 1. Download(s).
-        if let url = preferred(downloadURLs) {
-            var notes: [String] = []
-            if let alt = preferred(downloadURLs64), alt != url {
-                notes.append("64-bit alternative: \(alt)")
-            }
-            steps.append(InstallStep(
-                kind: .download,
-                url: url,
-                fileName: downloadFileName(fallbackURL: url),
-                description: notes.isEmpty ? "download installer" : notes.joined(separator: "; ")
-            ))
-        } else if let url = preferred(downloadURLs64) {
-            steps.append(InstallStep(
-                kind: .download,
-                url: url,
-                fileName: downloadFileName(fallbackURL: url),
-                description: "download 64-bit installer"
-            ))
-        }
+        steps.append(contentsOf: downloadSteps())
 
         // 2. Windows version for the installer.
         if let version = windowsVersion, !version.isEmpty {
@@ -216,7 +239,23 @@ extension CrossTieInstallRecord {
             steps.append(registryStep(entry, label: "pre-install registry"))
         }
 
-        // 4. Run the installer itself.
+        // 4. Prerequisite/component installers shipped on the same media. These
+        //    come from `<installprofile appid="…">` blocks and must not be
+        //    mistaken for the host app's own setup.
+        for profile in embeddedProfiles {
+            for glob in profile.localInstallerGlobs + profile.installerGlobs {
+                guard let name = Self.basename(glob), !name.isEmpty else { continue }
+                steps.append(InstallStep(
+                    kind: .runInstaller,
+                    command: name,
+                    description: "prerequisite component \(profile.appID) from installation media",
+                    requiresMedia: mediaMarker != nil,
+                    mediaPath: mediaMarker
+                ))
+            }
+        }
+
+        // 5. The host app's own installer.
         let notes = informationalNotes()
         if let command = installerCommand() {
             steps.append(InstallStep(
@@ -224,16 +263,30 @@ extension CrossTieInstallRecord {
                 command: command,
                 arguments: Self.splitArguments(installerOptions),
                 silentArguments: Self.splitArguments(silentOptions),
-                description: notes.isEmpty ? "run installer" : notes.joined(separator: "; ")
+                description: notes.isEmpty ? "run installer" : notes.joined(separator: "; "),
+                environment: environment,
+                requiresMedia: mediaMarker != nil,
+                mediaPath: mediaMarker
+            ))
+        } else if mediaMarker != nil, installerIDs.isEmpty {
+            // CD-based install whose main setup the catalog does not name
+            // (Office 2000/XP and friends). Surface it explicitly rather than
+            // silently dropping it or, worse, running a prerequisite instead.
+            steps.append(InstallStep(
+                kind: .runInstaller,
+                description: Self.mediaMessage(marker: mediaMarker, extras: notes),
+                environment: environment,
+                requiresMedia: true,
+                mediaPath: mediaMarker
             ))
         }
 
-        // 5. Post-install registry.
+        // 6. Post-install registry.
         for entry in registries where !entry.isPreInstall {
             steps.append(registryStep(entry, label: "post-install registry"))
         }
 
-        // 6. Copy files (recipes copy post-install, e.g. StarCraft's CD data).
+        // 7. Copy files (recipes copy post-install, e.g. StarCraft's CD data).
         for copy in fileCopies {
             steps.append(InstallStep(
                 kind: .copyFiles,
@@ -243,7 +296,7 @@ extension CrossTieInstallRecord {
             ))
         }
 
-        // 7. Shortcuts.
+        // 8. Shortcuts.
         for shortcut in shortcuts {
             steps.append(InstallStep(
                 kind: .createShortcut,
@@ -264,6 +317,54 @@ extension CrossTieInstallRecord {
         }
 
         return steps
+    }
+
+    /// Download steps.
+    ///
+    /// Documented single-step rule for `<downloadurl>` vs `<downloadurl64>`:
+    /// emit **one** `.download` step for the primary URL (`<downloadurl>`,
+    /// falling back to `<downloadurl64>` when there is no 32-bit URL), and,
+    /// when the catalog also lists a distinct 64-bit URL, expose it on the
+    /// step's `downloadURL64` field plus a note. Cork cannot know the bottle's
+    /// architecture at recipe-build time, so it does not queue both downloads.
+    private func downloadSteps() -> [InstallStep] {
+        let primary = preferred(downloadURLs) ?? preferred(downloadURLs64)
+        guard let url = primary else { return [] }
+
+        let alt64 = preferred(downloadURLs64)
+        let distinctAlt64 = (alt64 != url) ? alt64 : nil
+        let is64Only = preferred(downloadURLs) == nil
+
+        var notes: [String] = []
+        if let distinctAlt64 { notes.append("64-bit alternative: \(distinctAlt64)") }
+        let description = notes.isEmpty
+            ? (is64Only ? "download 64-bit installer" : "download installer")
+            : notes.joined(separator: "; ")
+
+        return [InstallStep(
+            kind: .download,
+            url: url,
+            fileName: downloadFileName(fallbackURL: url),
+            description: description,
+            downloadURL64: distinctAlt64
+        )]
+    }
+
+    /// Combined pre/post-install environment (`<preinstallenvironment>` /
+    /// `<installerenvironment>`), later entries winning on name collisions.
+    private func installerEnvironment() -> [String: String] {
+        var result: [String: String] = [:]
+        for environment in environments { result[environment.name] = environment.value }
+        return result
+    }
+
+    /// A human-readable step description for a CD-based install whose main
+    /// setup executable the catalog does not name.
+    private static func mediaMessage(marker: String?, extras: [String]) -> String {
+        var parts = ["installation media required: insert the application's CD/DVD and run its setup manually"]
+        if let marker, !marker.isEmpty { parts.append("media marker \(marker)") }
+        parts.append(contentsOf: extras)
+        return parts.joined(separator: "; ")
     }
 
     private func registryStep(_ entry: CrossTieRegistryEntry, label: String) -> InstallStep {
@@ -299,16 +400,13 @@ extension CrossTieInstallRecord {
     }
 
     /// Free-form notes for recipe metadata with no first-class `InstallStep`
-    /// representation.
+    /// representation. (Environment, media/CD globs and predependencies are now
+    /// surfaced as real fields; the predependency note is kept for continuity.)
     private func informationalNotes() -> [String] {
         var notes: [String] = []
         if !predependencies.isEmpty { notes.append("requires \(predependencies.joined(separator: ", "))") }
-        for environment in environments {
-            notes.append("\(environment.isPreInstall ? "pre" : "post") env \(environment.name)=\(environment.value)")
-        }
         if let option = selfExtractOption { notes.append("self-extract option \(option)") }
         if let threshold = selfExtractThreshold { notes.append("self-extract threshold \(threshold)") }
-        if !cdGlobs.isEmpty { notes.append("CD \(cdGlobs.joined(separator: ", "))") }
         if let url = preferred(postInstallURLs) { notes.append("post-install \(url)") }
         if !embeddedProfileAppIDs.isEmpty {
             notes.append("embedded profile for \(embeddedProfileAppIDs.joined(separator: ", "))")
@@ -394,6 +492,9 @@ private final class CrossTieInstallSAXDelegate: NSObject, XMLParserDelegate {
 
     private var insideAppProfile = false
     private var insideInstallProfile = false
+    /// Non-nil while inside an `<installprofile appid="X">` block where X is a
+    /// *different* app than the host: its installer globs belong to X.
+    private var embeddedProfileAppID: String?
 
     private var pendingRegistry: PendingRegistry?
     private var pendingFileCopy: PendingFileCopy?
@@ -430,6 +531,11 @@ private final class CrossTieInstallSAXDelegate: NSObject, XMLParserDelegate {
             current?.hasInstallProfile = true
             if let profileAppID = attributeDict["appid"], !profileAppID.isEmpty {
                 current?.embeddedProfileAppIDs.append(profileAppID)
+                // Only treat it as an embedded component profile when the id
+                // differs from the host app.
+                embeddedProfileAppID = (profileAppID == current?.appID) ? nil : profileAppID
+            } else {
+                embeddedProfileAppID = nil
             }
         case "preinstallregistry":
             pendingRegistry = PendingRegistry(isPre: true)
@@ -481,6 +587,7 @@ private final class CrossTieInstallSAXDelegate: NSObject, XMLParserDelegate {
             insideAppProfile = false
         case "installprofile":
             insideInstallProfile = false
+            embeddedProfileAppID = nil
         default:
             guard current != nil else { return }
             handleLeaf(elementName, value: value, parent: parent, grandparent: grandparent, lang: lang)
@@ -536,12 +643,20 @@ private final class CrossTieInstallSAXDelegate: NSObject, XMLParserDelegate {
         case "selfextractthreshold":
             if insideInstallProfile, !value.isEmpty { current?.selfExtractThreshold = value }
         case "installerglob":
-            if insideInstallProfile, !value.isEmpty, current?.installerGlobs.contains(value) != true {
-                current?.installerGlobs.append(value)
+            if insideInstallProfile, !value.isEmpty {
+                if let embedded = embeddedProfileAppID {
+                    current?.addEmbeddedGlob(appID: embedded, value: value, isLocal: false)
+                } else if current?.installerGlobs.contains(value) != true {
+                    current?.installerGlobs.append(value)
+                }
             }
         case "localinstallerglob":
-            if insideInstallProfile, !value.isEmpty, current?.localInstallerGlobs.contains(value) != true {
-                current?.localInstallerGlobs.append(value)
+            if insideInstallProfile, !value.isEmpty {
+                if let embedded = embeddedProfileAppID {
+                    current?.addEmbeddedGlob(appID: embedded, value: value, isLocal: true)
+                } else if current?.localInstallerGlobs.contains(value) != true {
+                    current?.localInstallerGlobs.append(value)
+                }
             }
         case "postinstallurl":
             if insideInstallProfile, !value.isEmpty { current?.postInstallURLs[lang] = value }

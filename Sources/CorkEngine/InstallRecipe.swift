@@ -42,6 +42,21 @@ public struct InstallStep: Sendable, Hashable, Codable {
     public var windowsVersion: String?
     /// Human-readable description.
     public var description: String?
+    /// A distinct 64-bit download URL for a `.download` step, when the catalog
+    /// lists both `<downloadurl>` and `<downloadurl64>`.
+    ///
+    /// Documented rule: Cork emits a single `.download` step for the primary
+    /// URL and exposes the 64-bit alternative here — it cannot know the
+    /// bottle's architecture at recipe-build time, so it does not queue both.
+    public var downloadURL64: String?
+    /// Environment variables (name → value) that apply while running the step,
+    /// from `<preinstallenvironment>` / `<installerenvironment>`.
+    public var environment: [String: String]
+    /// True when the step needs removable installation media (a CD/DVD) that
+    /// Cork cannot fetch; a human must insert the disc before it can run.
+    public var requiresMedia: Bool
+    /// The media marker file (`<cdglob><glob>`) that identifies the disc.
+    public var mediaPath: String?
 
     public init(
         kind: InstallStepKind,
@@ -57,7 +72,11 @@ public struct InstallStep: Sendable, Hashable, Codable {
         registryName: String? = nil,
         registryData: String? = nil,
         windowsVersion: String? = nil,
-        description: String? = nil
+        description: String? = nil,
+        downloadURL64: String? = nil,
+        environment: [String: String] = [:],
+        requiresMedia: Bool = false,
+        mediaPath: String? = nil
     ) {
         self.kind = kind
         self.url = url
@@ -73,6 +92,10 @@ public struct InstallStep: Sendable, Hashable, Codable {
         self.registryData = registryData
         self.windowsVersion = windowsVersion
         self.description = description
+        self.downloadURL64 = downloadURL64
+        self.environment = environment
+        self.requiresMedia = requiresMedia
+        self.mediaPath = mediaPath
     }
 }
 
@@ -84,17 +107,22 @@ public struct InstallRecipe: Sendable, Hashable, Codable {
     public var steps: [InstallStep]
     public var requiresReboot: Bool
     public var dllOverrides: [String]
+    /// Apps this recipe depends on (`<predependency>`), surfaced for callers
+    /// that want to check/install them separately.
+    public var predependencies: [String]
 
     public init(
         appID: String,
         steps: [InstallStep] = [],
         requiresReboot: Bool = false,
-        dllOverrides: [String] = []
+        dllOverrides: [String] = [],
+        predependencies: [String] = []
     ) {
         self.appID = appID
         self.steps = steps
         self.requiresReboot = requiresReboot
         self.dllOverrides = dllOverrides
+        self.predependencies = predependencies
     }
 }
 
@@ -122,33 +150,61 @@ public struct CrossTieInstallRecipes: InstallRecipeProviding {
     /// The install recipe for `appID`, or `nil` when the catalog has no install
     /// content for it (metadata-only apps, unknown ids, self-closing profiles).
     public func installRecipe(appID: String) -> InstallRecipe? {
-        buildRecipe(appID: appID, visited: [])
+        var visited = Set<String>()
+        return buildRecipe(appID: appID, visited: &visited)
     }
 
-    private func buildRecipe(appID: String, visited: Set<String>) -> InstallRecipe? {
+    /// Build the recipe for `appID`, resolving **every** `<installerid>`
+    /// reference recursively.
+    ///
+    /// `<installerid>` points at another app whose installer actually performs
+    /// the install (e.g. Microsoft Word 2000 → Microsoft Office 2000, or Word
+    /// 2002 → Office XP). A host may list several ids; each is expanded.
+    ///
+    /// `visited` is shared across the whole traversal, so every app id is
+    /// expanded at most once per lookup. That both breaks reference cycles
+    /// (A → B → A) and dedupes diamond references (A → B → D, A → C → D), so
+    /// dependency steps never repeat.
+    ///
+    /// Ordering matches CrossTie semantics: dependencies' steps first, then the
+    /// host's own non-installer steps (Windows version, registry, …), and only
+    /// then the host's own download / run-installer step(s).
+    private func buildRecipe(appID: String, visited: inout Set<String>) -> InstallRecipe? {
         guard !visited.contains(appID), let record = index.record(for: appID) else { return nil }
-        var visited = visited
         visited.insert(appID)
 
-        var steps = record.installSteps()
-        var requiresReboot = record.requiresReboot
-        var dllOverrides = record.dllOverrides
+        var dependencySteps: [InstallStep] = []
+        var requiresReboot = false
+        var dllOverrides: [String] = []
+        var predependencies = record.predependencies
 
-        // `<installerid>` points at another app whose recipe provides the
-        // installer (e.g. Microsoft Word 2000 → Microsoft Office 2000). Only
-        // follow it when this app has no installer/download of its own; its own
-        // tweaks (registry, DLL overrides) are kept ahead of the referenced steps.
-        let hasOwnInstaller = steps.contains { $0.kind == .runInstaller || $0.kind == .download }
-        if !hasOwnInstaller {
-            for installerID in record.installerIDs where installerID != appID {
-                guard let referenced = buildRecipe(appID: installerID, visited: visited) else { continue }
-                steps.append(contentsOf: referenced.steps)
-                requiresReboot = requiresReboot || referenced.requiresReboot
-                for override in referenced.dllOverrides where !dllOverrides.contains(override) {
-                    dllOverrides.append(override)
-                }
-                break
+        for installerID in record.installerIDs where installerID != appID {
+            guard let referenced = buildRecipe(appID: installerID, visited: &visited) else { continue }
+            dependencySteps.append(contentsOf: referenced.steps)
+            requiresReboot = requiresReboot || referenced.requiresReboot
+            for override in referenced.dllOverrides where !dllOverrides.contains(override) {
+                dllOverrides.append(override)
             }
+            for dependency in referenced.predependencies where !predependencies.contains(dependency) {
+                predependencies.append(dependency)
+            }
+        }
+
+        let ownSteps = record.installSteps()
+        let steps: [InstallStep]
+        if dependencySteps.isEmpty {
+            // No indirection: keep the record's natural step order untouched.
+            steps = ownSteps
+        } else {
+            let isInstallerStep: (InstallStep) -> Bool = { $0.kind == .download || $0.kind == .runInstaller }
+            let preamble = ownSteps.filter { !isInstallerStep($0) }
+            let installers = ownSteps.filter(isInstallerStep)
+            steps = dependencySteps + preamble + installers
+        }
+
+        requiresReboot = requiresReboot || record.requiresReboot
+        for override in record.dllOverrides where !dllOverrides.contains(override) {
+            dllOverrides.append(override)
         }
 
         guard !steps.isEmpty || requiresReboot || !dllOverrides.isEmpty else { return nil }
@@ -156,7 +212,8 @@ public struct CrossTieInstallRecipes: InstallRecipeProviding {
             appID: appID,
             steps: steps,
             requiresReboot: requiresReboot,
-            dllOverrides: dllOverrides
+            dllOverrides: dllOverrides,
+            predependencies: predependencies
         )
     }
 }

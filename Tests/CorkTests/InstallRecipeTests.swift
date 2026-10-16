@@ -28,6 +28,14 @@ private let installFixture = #"""
         <installerdlloverrides>foo=n;bar=b</installerdlloverrides>
         <installersilentoption>/S</installersilentoption>
         <installeroption>/sp-</installeroption>
+        <preinstallenvironment>
+          <name>FOO</name>
+          <value>bar</value>
+        </preinstallenvironment>
+        <installerenvironment>
+          <name>BAZ</name>
+          <value>qux</value>
+        </installerenvironment>
         <preinstallregistry>
           <key>HKEY_CURRENT_USER\Software\X</key>
           <value><name>n</name><data>d</data></value>
@@ -68,6 +76,78 @@ private let installFixture = #"""
           <target>"C:\Games\Game.exe" +fullscreen 0</target>
         </lnkfile>
       </installprofile>
+    </app>
+  </applications>
+</c4p>
+"""#
+
+/// A second fixture for the install-cd track: multi-`<installerid>` chains
+/// (ordering, dedupe, cycle protection), CD/media installs (embedded component
+/// installers + the un-named main setup), and 32/64-bit download pairs.
+private let installChainFixture = #"""
+<?xml version="1.0" encoding="UTF-8"?>
+<c4p>
+  <applications>
+    <app appid="com.example.chain.host">
+      <appprofile>
+        <downloadurl>https://example.com/host.exe</downloadurl>
+        <installerid>com.example.chain.dep1</installerid>
+        <installerid>com.example.chain.dep2</installerid>
+        <installerid>com.example.chain.dep1</installerid>
+      </appprofile>
+      <installprofile>
+        <preinstallregistry>
+          <key>HKEY_CURRENT_USER\Software\Host</key>
+          <value><name>h</name><data>1</data></value>
+        </preinstallregistry>
+      </installprofile>
+    </app>
+    <app appid="com.example.chain.dep1">
+      <appprofile>
+        <downloadurl>https://example.com/dep1.exe</downloadurl>
+        <installerid>com.example.chain.dep2</installerid>
+      </appprofile>
+    </app>
+    <app appid="com.example.chain.dep2">
+      <appprofile>
+        <downloadurl>https://example.com/dep2.exe</downloadurl>
+        <installerid>com.example.chain.host</installerid>
+      </appprofile>
+    </app>
+
+    <app appid="com.example.media">
+      <appprofile><description>CD app</description></appprofile>
+      <installprofile>
+        <preinstallregistry>
+          <key>HKEY_CURRENT_USER\Software\Media</key>
+          <value><name>m</name><data>2</data></value>
+        </preinstallregistry>
+      </installprofile>
+      <installprofile appid="com.example.media.component">
+        <localinstallerglob>media/COMP/SETUP.EXE</localinstallerglob>
+      </installprofile>
+      <cdprofile>
+        <cdglob>
+          <glob>autorun.inf</glob>
+          <pattern>ProductCode={CD}</pattern>
+        </cdglob>
+      </cdprofile>
+    </app>
+
+    <app appid="com.example.media.derivable">
+      <installprofile>
+        <installerglob>disc/setup.exe</installerglob>
+      </installprofile>
+      <cdprofile>
+        <cdglob><glob>setup.ini</glob><pattern>X</pattern></cdglob>
+      </cdprofile>
+    </app>
+
+    <app appid="com.example.bothurls">
+      <appprofile>
+        <downloadurl>https://example.com/App32.exe</downloadurl>
+        <downloadurl64>https://example.com/App64.exe</downloadurl64>
+      </appprofile>
     </app>
   </applications>
 </c4p>
@@ -157,6 +237,7 @@ func installRecipeTests() -> [TestCase] {
             try expectEqual(recipe.steps.map(\.kind), [.download, .runInstaller])
             try expectEqual(recipe.steps[0].url, "https://example.com/App64.msi" as String?)
             try expectEqual(recipe.steps[0].fileName, "App64.msi" as String?)
+            try expectEqual(recipe.steps[0].downloadURL64, nil, "no separate alternative when only the 64-bit URL exists")
             try expectEqual(recipe.steps[1].command, "App64.msi" as String?)
             try expect(!recipe.requiresReboot)
         }),
@@ -179,6 +260,106 @@ func installRecipeTests() -> [TestCase] {
             try expectEqual(shortcut.arguments, ["+fullscreen", "0"], "trailing arguments are split out")
             try expectEqual(shortcut.fileName, "Game" as String?)
             try expect(!recipe.requiresReboot, "postinstallreboot=false")
+        }),
+
+        TestCase(name: "installRecipeResolvesAllInstallerIDsInOrderWithCycleProtection", body: {
+            let recipes = try makeInstallRecipes(installChainFixture)
+            let recipe = try recipe(recipes, "com.example.chain.host")
+
+            // dep2 → dep1 → host, with the host's own registry preamble placed
+            // after dependencies but before the host's own installer.
+            try expectEqual(
+                recipe.steps.map(\.kind),
+                [.download, .runInstaller, .download, .runInstaller, .registry, .download, .runInstaller],
+                "dependencies' steps come first, then the host's own preamble, then the host's run step"
+            )
+            try expectEqual(
+                recipe.steps.compactMap(\.url),
+                [
+                    "https://example.com/dep2.exe",
+                    "https://example.com/dep1.exe",
+                    "https://example.com/host.exe",
+                ],
+                "every installer id is resolved, in dependency order"
+            )
+            try expectEqual(recipe.steps[4].registryKey, #"HKEY_CURRENT_USER\Software\Host"# as String?)
+
+            try expectEqual(
+                recipe.steps.filter { $0.url == "https://example.com/dep1.exe" }.count,
+                1,
+                "a duplicated installer id is expanded once"
+            )
+            try expectEqual(
+                recipe.steps.filter { $0.url == "https://example.com/dep2.exe" }.count,
+                1,
+                "a shared/cyclic dependency is expanded once"
+            )
+        }),
+
+        TestCase(name: "installRecipeSurfacesEnvironmentAndPredependencies", body: {
+            let recipes = try makeInstallRecipes(installFixture)
+            let recipe = try recipe(recipes, "com.example.rich")
+            try expectEqual(recipe.predependencies, ["com.example.dep"], "predependency is a first-class field")
+            guard let installer = recipe.steps.first(where: { $0.kind == .runInstaller }) else {
+                throw TestFailure(description: "expected a runInstaller step")
+            }
+            try expectEqual(
+                installer.environment,
+                ["FOO": "bar", "BAZ": "qux"],
+                "pre/install environment is surfaced on the run step"
+            )
+        }),
+
+        TestCase(name: "installRecipeRepresentsBothDownloadURLs", body: {
+            let recipes = try makeInstallRecipes(installChainFixture)
+            let recipe = try recipe(recipes, "com.example.bothurls")
+            try expectEqual(
+                recipe.steps.map(\.kind),
+                [.download, .runInstaller],
+                "documented single-step rule: one download (plus the derived run step), never both URLs"
+            )
+            let download = recipe.steps[0]
+            try expectEqual(download.url, "https://example.com/App32.exe" as String?)
+            try expectEqual(download.downloadURL64, "https://example.com/App64.exe" as String?, "the 64-bit URL is preserved")
+            try expectEqual(download.fileName, "App32.exe" as String?)
+        }),
+
+        TestCase(name: "installRecipeMarksCDOnlyMainSetupAsRequiringMedia", body: {
+            let recipes = try makeInstallRecipes(installChainFixture)
+            let recipe = try recipe(recipes, "com.example.media")
+
+            try expectEqual(
+                recipe.steps.map(\.kind),
+                [.registry, .runInstaller, .runInstaller],
+                "pre-registry, then the component installer, then the un-named main setup"
+            )
+
+            let component = recipe.steps[1]
+            try expectEqual(component.command, "SETUP.EXE" as String?, "the embedded component installer is runnable")
+            try expect(
+                component.description?.contains("com.example.media.component") == true,
+                "the component glob is attributed to its own app, not the host"
+            )
+            try expect(component.requiresMedia, "a component shipped on the CD needs the disc")
+            try expectEqual(component.mediaPath, "autorun.inf" as String?)
+
+            let mainSetup = recipe.steps[2]
+            try expectEqual(mainSetup.command, nil, "the un-named main setup is not guessed")
+            try expect(mainSetup.requiresMedia, "the main setup requires the installation media")
+            try expectEqual(mainSetup.mediaPath, "autorun.inf" as String?)
+            try expect(
+                mainSetup.description?.contains("installation media required") == true,
+                "the gap is worded explicitly, not silently dropped"
+            )
+        }),
+
+        TestCase(name: "installRecipeUsesDerivableCDInstaller", body: {
+            let recipes = try makeInstallRecipes(installChainFixture)
+            let recipe = try recipe(recipes, "com.example.media.derivable")
+            try expectEqual(recipe.steps.map(\.kind), [.runInstaller], "no placeholder when the setup is named")
+            try expectEqual(recipe.steps[0].command, "setup.exe" as String?)
+            try expect(recipe.steps[0].requiresMedia, "a CD installer still needs the disc")
+            try expectEqual(recipe.steps[0].mediaPath, "setup.ini" as String?)
         }),
 
         TestCase(name: "installRecipeMalformedXMLThrows", body: {
