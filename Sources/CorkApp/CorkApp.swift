@@ -40,6 +40,16 @@ struct CorkApp: App {
                 }
                 .keyboardShortcut("3", modifiers: .command)
 
+                Button("Dependencies") {
+                    model.section = .dependencies
+                }
+                .keyboardShortcut("4", modifiers: .command)
+
+                Button("Diagnostics") {
+                    model.section = .diagnostics
+                }
+                .keyboardShortcut("5", modifiers: .command)
+
                 Divider()
 
                 Button("Refresh") {
@@ -66,6 +76,16 @@ struct CorkApp: App {
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .disabled(model.selectedBottle == nil || model.isDiscoveringPrograms)
+
+                Divider()
+
+                Button("File Associations…") {
+                    model.section = .bottles
+                    if let name = model.selectedBottleName {
+                        model.requestAddAssociation(bottleName: name)
+                    }
+                }
+                .disabled(model.selectedBottleName == nil)
             }
         }
     }
@@ -88,6 +108,10 @@ struct RootView: View {
                 CatalogView()
             case .files:
                 BottleFilesView()
+            case .dependencies:
+                DependenciesView()
+            case .diagnostics:
+                DiagnosticsView()
             }
         } detail: {
             switch section {
@@ -97,6 +121,10 @@ struct RootView: View {
                 CatalogDetailView()
             case .files:
                 BottleFilesDetailView()
+            case .dependencies:
+                DependenciesDetailView()
+            case .diagnostics:
+                DiagnosticsDetailView()
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -117,6 +145,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showBundleSheet) {
             CreateBundleSheet()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showDependencyInstallSheet) {
+            DependencyInstallSheet()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showAssociationSheet) {
+            AddAssociationSheet()
                 .environmentObject(model)
         }
         .sheet(isPresented: logsPresented) {
