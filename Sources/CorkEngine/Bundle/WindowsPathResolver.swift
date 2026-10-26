@@ -46,7 +46,7 @@ enum WindowsPathResolver {
         let characters = Array(path)
         guard characters[0].isLetter, characters[1] == ":" else { return nil }
         guard characters[2] == "\\" || characters[2] == "/" else { return nil }
-        let rest = String(characters[3...])
+        let rest = String(characters.dropFirst(3))
         return DriveMatch(drive: String(characters[0]), rest: rest)
     }
 

@@ -8,7 +8,10 @@ public struct GraphicsInstaller {
     }
 
     public func setBackend(_ backend: GraphicsBackend, on bottle: inout Bottle) throws {
-        try removeInstalledFiles(from: &bottle)
+        // Install the new backend first, then drop only the files the previous
+        // backend owned. If installation fails midway the bottle keeps its old
+        // (working) runtime instead of ending up with no graphics DLLs.
+        let previousFiles = bottle.metadata.graphicsFiles
         let files: [String]
         switch backend {
         case .wined3d:
@@ -18,6 +21,7 @@ public struct GraphicsInstaller {
         case .dxmt:
             files = try installDXMT(into: &bottle)
         }
+        removeInstalledFiles(previousFiles, keeping: Set(files), from: &bottle)
         bottle.metadata.graphicsFiles = files
         bottle.metadata.settings.backend = backend
         try bottle.save()
@@ -37,15 +41,14 @@ public struct GraphicsInstaller {
         return runtime.componentDirectory(component)
     }
 
-    private func removeInstalledFiles(from bottle: inout Bottle) throws {
+    private func removeInstalledFiles(_ files: [String], keeping keep: Set<String>, from bottle: inout Bottle) {
         let fm = FileManager.default
-        for relative in bottle.metadata.graphicsFiles {
+        for relative in files where !keep.contains(relative) {
             let url = bottle.url.appendingPathComponent(relative)
             if fm.fileExists(atPath: url.path) {
                 try? fm.removeItem(at: url)
             }
         }
-        bottle.metadata.graphicsFiles = []
     }
 
     private func installDXVK(into bottle: inout Bottle) throws -> [String] {

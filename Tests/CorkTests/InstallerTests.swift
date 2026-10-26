@@ -199,17 +199,18 @@ func installerTests() -> [TestCase] {
             let installer = InstallRecipe(appID: "x", steps: [
                 InstallStep(kind: .runInstaller, command: "setup.exe", arguments: ["/interactive"], silentArguments: ["/S", "/norestart"]),
             ])
-            guard case .run(let installerCommand, let installerArgs, _, let installerIsInstaller) = InstallPlanner.plan(installer)[0].action else {
+            guard case .run(let installerCommand, let installerArgs, _, let installerIsInstaller, let installerEnvironment) = InstallPlanner.plan(installer)[0].action else {
                 throw TestFailure(description: "expected a run action")
             }
             try expectEqual(installerCommand, "setup.exe")
             try expectEqual(installerArgs, ["/S", "/norestart"])
             try expect(installerIsInstaller, "runInstaller should be flagged as an installer")
+            try expect(installerEnvironment.isEmpty, "no environment overrides by default")
 
             let command = InstallRecipe(appID: "x", steps: [
                 InstallStep(kind: .runCommand, command: "cmd", arguments: ["/c", "echo"], silentArguments: ["/quiet"]),
             ])
-            guard case .run(let commandValue, let commandArgs, _, let commandIsInstaller) = InstallPlanner.plan(command)[0].action else {
+            guard case .run(let commandValue, let commandArgs, _, let commandIsInstaller, _) = InstallPlanner.plan(command)[0].action else {
                 throw TestFailure(description: "expected a run action")
             }
             try expectEqual(commandValue, "cmd")
@@ -219,7 +220,7 @@ func installerTests() -> [TestCase] {
             let fellBack = InstallRecipe(appID: "x", steps: [
                 InstallStep(kind: .runCommand, command: "tool", silentArguments: ["/quiet"]),
             ])
-            guard case .run(_, let fallbackArgs, _, _) = InstallPlanner.plan(fellBack)[0].action else {
+            guard case .run(_, let fallbackArgs, _, _, _) = InstallPlanner.plan(fellBack)[0].action else {
                 throw TestFailure(description: "expected a run action")
             }
             try expectEqual(fallbackArgs, ["/quiet"])
@@ -283,6 +284,82 @@ func installerTests() -> [TestCase] {
             try expect(script.contains("CreateObject(\"WScript.Shell\")"), "uses WScript.Shell")
             try expect(script.contains("C:\\App\\app.exe"), "sets the target")
             try expect(script.contains("link.Save"), "saves the shortcut")
+        }),
+
+        TestCase(name: "installerStatusAcceptance", body: {
+            try expect(InstallPlanner.isSuccessfulInstallerStatus(0), "0 is success")
+            try expect(InstallPlanner.isSuccessfulInstallerStatus(3010), "3010 means reboot required")
+            try expect(InstallPlanner.isSuccessfulInstallerStatus(1641), "1641 means reboot initiated")
+            try expect(!InstallPlanner.isSuccessfulInstallerStatus(1), "1 is a failure")
+            try expect(!InstallPlanner.isSuccessfulInstallerStatus(1603), "1603 is a fatal install error")
+        }),
+
+        TestCase(name: "shortcutEnvironmentExpansion", body: {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("cork-installer-\(UUID().uuidString)")
+            let driveC = root.appendingPathComponent("drive_c", isDirectory: true)
+            try FileManager.default.createDirectory(at: driveC, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let environment = InstallPlanner.windowsEnvironment(driveC: driveC, userName: "tester")
+            try expectEqual(
+                InstallPlanner.expandEnvironment(#"%StartMenu%\Programs\App.lnk"#, environment: environment),
+                #"C:\users\tester\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\App.lnk"#
+            )
+            try expectEqual(
+                InstallPlanner.resolveWindowsPath(#"%StartMenu%\Programs\App.lnk"#, driveC: driveC, environment: environment),
+                driveC.appendingPathComponent("users/tester/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/App.lnk").standardizedFileURL.path
+            )
+            try expectEqual(
+                InstallPlanner.expandEnvironment(#"%ProgramFiles%\App\app.exe"#, environment: environment),
+                #"C:\Program Files\App\app.exe"#
+            )
+        }),
+
+        TestCase(name: "windowsPathContainment", body: {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("cork-installer-\(UUID().uuidString)")
+            let driveC = root.appendingPathComponent("drive_c", isDirectory: true)
+            let dosdevices = root.appendingPathComponent("dosdevices", isDirectory: true)
+            try FileManager.default.createDirectory(at: driveC, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: dosdevices, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createSymbolicLink(
+                at: dosdevices.appendingPathComponent("z:"),
+                withDestinationURL: URL(fileURLWithPath: "/")
+            )
+
+            let environment = InstallPlanner.windowsEnvironment(driveC: driveC, userName: "tester")
+            let rootPrefix = driveC.standardizedFileURL.path
+
+            for path in [
+                #"\\server\share\app.exe"#,
+                #"//server/share/app.exe"#,
+                #"Z:\etc\passwd"#,
+                #"D:\missing\app.exe"#,
+                #"C:\..\..\escape.exe"#,
+                #"..\..\escape.exe"#,
+            ] {
+                let resolved = InstallPlanner.resolveWindowsPath(path, driveC: driveC, environment: environment)
+                try expect(
+                    resolved == rootPrefix || resolved.hasPrefix(rootPrefix + "/"),
+                    "\(path) escaped the prefix: \(resolved)"
+                )
+            }
+        }),
+
+        TestCase(name: "quotedArgumentSplitting", body: {
+            try expectEqual(
+                InstallPlanner.splitCommandLine(#"/S "/D=C:\Program Files\App" /norestart"#),
+                ["/S", #"/D=C:\Program Files\App"#, "/norestart"]
+            )
+            try expectEqual(
+                InstallPlanner.splitCommandLine(#"one 'two three' four"#),
+                ["one", "'two", "three'", "four"],
+                "single quotes are literal on Windows"
+            )
+            try expectEqual(
+                InstallPlanner.splitCommandLine(#"empty "" arg"#),
+                ["empty", "", "arg"]
+            )
         }),
 
         TestCase(name: "runtimeGuardSkipsWithoutWine", body: {

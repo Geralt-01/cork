@@ -49,6 +49,29 @@ public enum AssociationRegistry {
         entries.flatMap(commands(for:))
     }
 
+    /// Registry deletions for associations that are no longer configured.
+    ///
+    /// A ProgID is only removed when no remaining entry uses it, so shared
+    /// handlers survive. Extensions that were removed outright lose their
+    /// `HKCU\Software\Classes\<ext>` mapping.
+    public static func removalCommands(
+        progIDs: Set<String>,
+        fileExtensions: Set<String>
+    ) -> [[String]] {
+        var commands: [[String]] = []
+        for extensionName in fileExtensions.sorted() {
+            commands.append([
+                "delete", "\(classesRoot)\\\(extensionName)", "/f",
+            ])
+        }
+        for progID in progIDs.sorted() {
+            commands.append([
+                "delete", "\(classesRoot)\\\(progID)", "/f",
+            ])
+        }
+        return commands
+    }
+
     /// The `shell\open\command` value: `"<exe>" arg… "%1"`.
     public static func openCommand(for entry: AssociationEntry) -> String {
         var parts = ["\"\(entry.executable)\""]

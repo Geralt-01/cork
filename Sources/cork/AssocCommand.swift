@@ -23,7 +23,8 @@ struct AssocCommand: AsyncParsableCommand {
         var registry: Bool = false
 
         func run() throws {
-            let store = AssociationStore()
+            let paths = try AssocCommand.requireBottle(bottle)
+            let store = AssociationStore(paths: paths)
             let entries = try store.read(bottle: bottle)
             print(Terminal.bold("\(entries.count) associations in '\(bottle)'"))
             for entry in entries {
@@ -62,8 +63,9 @@ struct AssocCommand: AsyncParsableCommand {
         func run() throws {
             var ext = fileExtension
             if !ext.hasPrefix(".") { ext = "." + ext }
+            let paths = try AssocCommand.requireBottle(bottle)
             let resolved = progID ?? Self.generatedProgID(executable: executable, fileExtension: ext)
-            try AssociationStore().set(
+            try AssociationStore(paths: paths).set(
                 AssociationEntry(
                     fileExtension: ext,
                     progID: resolved,
@@ -105,8 +107,20 @@ struct AssocCommand: AsyncParsableCommand {
         func run() throws {
             var ext = fileExtension
             if !ext.hasPrefix(".") { ext = "." + ext }
-            try AssociationStore().remove(fileExtension: ext, bottle: bottle)
+            let paths = try AssocCommand.requireBottle(bottle)
+            try AssociationStore(paths: paths).remove(fileExtension: ext, bottle: bottle)
             print(Terminal.check("removed \(ext) from '\(bottle)'"))
         }
+    }
+
+    /// Association writes create the bottle directory as a side effect, so
+    /// reject unknown bottles up front instead of leaving a phantom behind.
+    private static func requireBottle(_ name: String) throws -> CorkPaths {
+        try Bottle.validateName(name)
+        let paths = CorkPaths.resolve()
+        guard FileManager.default.fileExists(atPath: paths.bottleDirectory(named: name).path) else {
+            throw CorkError.bottleNotFound(name: name)
+        }
+        return paths
     }
 }

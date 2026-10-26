@@ -80,6 +80,35 @@ public enum WindowsVersion: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// `CurrentMajorVersionNumber` (DWORD). Wine reports this value in
+    /// preference to `CurrentVersion` for Windows 8.1 and newer, so it must be
+    /// kept in sync when switching a prefix's reported version.
+    public var registryMajor: Int {
+        switch self {
+        case .win95, .win98, .winme, .nt40: return 4
+        case .win2000, .winxp, .win2003: return 5
+        case .winvista, .win2008, .win7, .win8, .win81: return 6
+        case .win10: return 10
+        }
+    }
+
+    /// `CurrentMinorVersionNumber` (DWORD), paired with ``registryMajor``.
+    public var registryMinor: Int {
+        switch self {
+        case .win95: return 0
+        case .win98: return 10
+        case .winme: return 90
+        case .nt40, .win2000: return 0
+        case .winxp: return 1
+        case .win2003: return 2
+        case .winvista, .win2008: return 0
+        case .win7: return 1
+        case .win8: return 2
+        case .win81: return 3
+        case .win10: return 0
+        }
+    }
+
     /// Parses a version written by a user or a CrossTie recipe, accepting the
     /// common aliases (`win2k`, `w2k3`, `vista`, `winxp64`, …).
     public init?(catalogValue value: String) {

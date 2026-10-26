@@ -81,7 +81,7 @@ struct RuntimeCommand: AsyncParsableCommand {
                 print("  \(component.id.padded(8)) \(component.version.padded(10)) \(state) \(Terminal.formatBytes(component.size))")
             }
             print("")
-            let wineReady = manager.manifest.wineComponent.map { results[$0.id]?.installed == true } ?? false
+            let wineReady = manager.isWineReady
             if wineReady {
                 print(Terminal.check("Wine is ready. Create a bottle with: cork bottle create my-game"))
             } else {

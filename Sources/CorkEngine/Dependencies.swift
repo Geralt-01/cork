@@ -55,9 +55,9 @@ public protocol DependencyInstalling: Sendable {
 /// Installs execute a ``DependencyDefinition``'s steps against a bottle using
 /// only public CorkKit APIs: ``CorkPaths``, ``BottleManager``, ``Downloader`` and
 /// the path/argument helpers in ``InstallPlanner``. Non-fatal failures (a failed
-/// `reg add`, a non-zero installer exit, a failed DLL copy) are reported as
-/// ``InstallEvent/warning`` and execution continues; a download failure and a
-/// missing bottle are fatal.
+/// `reg add`, a non-zero `runCommand`, a failed DLL copy) are reported as
+/// ``InstallEvent/warning`` and execution continues; a failed download, a
+/// non-zero installer exit (other than 3010/1641) and a missing bottle are fatal.
 public struct DependencyManager: DependencyInstalling {
     public let paths: CorkPaths
 
@@ -180,7 +180,7 @@ public struct DependencyManager: DependencyInstalling {
             }
 
         case .runInstaller(let executable, let arguments):
-            run(
+            try run(
                 command: executable,
                 arguments: arguments,
                 isInstaller: true,
@@ -193,7 +193,7 @@ public struct DependencyManager: DependencyInstalling {
             )
 
         case .runCommand(let executable, let arguments):
-            run(
+            try run(
                 command: executable,
                 arguments: arguments,
                 isInstaller: false,
@@ -290,7 +290,7 @@ public struct DependencyManager: DependencyInstalling {
         cache: URL,
         environment: [String: String],
         onEvent: @escaping @Sendable (InstallEvent) -> Void
-    ) {
+    ) throws {
         let display = ([command] + arguments).joined(separator: " ")
         onEvent(.running(display))
         do {
@@ -315,11 +315,18 @@ public struct DependencyManager: DependencyInstalling {
             } else {
                 status = try manager.exec(named: bottleName, command: command, arguments: arguments)
             }
-            if status != 0 {
-                let kind = isInstaller ? "installer" : "command"
-                onEvent(.warning("\(kind) '\(command)' exited with status \(status)"))
+            if !InstallPlanner.isSuccessfulInstallerStatus(status) {
+                if isInstaller {
+                    throw CorkError.processFailed(command: command, status: status)
+                }
+                onEvent(.warning("command '\(command)' exited with status \(status)"))
+            } else if isInstaller, status == 3010 || status == 1641 {
+                onEvent(.warning("installer '\(command)' requested a reboot; restart the bottle before using it."))
             }
         } catch {
+            if isInstaller {
+                throw error
+            }
             onEvent(.warning("could not run '\(command)': \(describe(error))"))
         }
     }

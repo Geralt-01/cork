@@ -32,7 +32,7 @@ public protocol AppInstalling: Sendable {
 /// ``InstallPlanner``; each action is then executed in order:
 ///
 /// * ``InstallStepKind/download`` — download into a per-bottle cache directory
-///   (and extract `.zip`s best-effort).
+///   (and extract `.zip` archives best-effort).
 /// * ``InstallStepKind/setWindowsVersion`` — `bottle set windows=<version>`.
 /// * ``InstallStepKind/runInstaller`` / ``InstallStepKind/runCommand`` — through
 ///   ``BottleManager``, preferring silent arguments for installers.
@@ -40,9 +40,10 @@ public protocol AppInstalling: Sendable {
 /// * ``InstallStepKind/createShortcut`` — see ``ShortcutWriter``.
 /// * ``InstallStepKind/registry`` — `wine reg add …`.
 ///
-/// Non-fatal failures (a failed `reg add`, a missing shortcut target, an
-/// unsupported `.zip` on this build, …) are reported as ``InstallEvent/warning``
-/// and execution continues. Download failures and a missing bottle are fatal.
+/// Non-fatal failures (a failed `reg add`, a missing shortcut target, a corrupt
+/// download archive, a non-zero `runCommand`, …) are reported as
+/// ``InstallEvent/warning`` and execution continues. A non-zero installer exit
+/// (other than 3010/1641), a failed download and a missing bottle are fatal.
 public struct WineInstaller: AppInstalling {
     public let paths: CorkPaths
 
@@ -137,24 +138,36 @@ public struct WineInstaller: AppInstalling {
                 onEvent(.warning("could not set Windows version to '\(version)': \(describe(error))"))
             }
 
-        case .run(let command, let arguments, _, let isInstaller):
+        case .run(let command, let arguments, let workingDirectory, let isInstaller, let overrides):
             let shown = resolvedDisplayName(command, bottle: bottle, cache: cache, environment: environment)
             onEvent(.running(([shown] + arguments).joined(separator: " ")))
             do {
                 let status = try runProcess(
                     command: command,
                     arguments: arguments,
+                    workingDirectory: workingDirectory,
                     bottleName: bottleName,
                     bottle: bottle,
                     manager: manager,
                     cache: cache,
-                    environment: environment
+                    environment: environment,
+                    overrides: overrides
                 )
-                if status != 0 {
-                    let kind = isInstaller ? "installer" : "command"
-                    onEvent(.warning("\(kind) '\(command)' exited with status \(status)"))
+                if !InstallPlanner.isSuccessfulInstallerStatus(status) {
+                    if isInstaller {
+                        throw CorkError.processFailed(command: command, status: status)
+                    }
+                    onEvent(.warning("command '\(command)' exited with status \(status)"))
+                } else if isInstaller, status == 3010 || status == 1641 {
+                    onEvent(.warning("installer '\(command)' requested a reboot; restart the bottle before using it."))
                 }
             } catch {
+                // A failed installer leaves the bottle in an unknown state, so
+                // stop rather than letting later steps run against a partial
+                // install. Plain commands (and `reg add`) stay best-effort.
+                if isInstaller {
+                    throw error
+                }
                 onEvent(.warning("could not run '\(command)': \(describe(error))"))
             }
 
@@ -238,6 +251,23 @@ public struct WineInstaller: AppInstalling {
             return
         }
         let destination = cache.appendingPathComponent(fileName)
+        let extractionRoot = cache.appendingPathComponent(
+            destination.deletingPathExtension().lastPathComponent,
+            isDirectory: true
+        )
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            onEvent(.resolving("using cached \(fileName)"))
+            if extract, !FileManager.default.fileExists(atPath: extractionRoot.path) {
+                do {
+                    try Archive.extract(archive: destination, to: extractionRoot, format: .zip)
+                } catch {
+                    onEvent(.warning("could not extract cached '\(fileName)': \(describe(error))"))
+                }
+            }
+            return
+        }
+
         onEvent(.downloading(name: fileName, totalBytes: nil))
 
         let reportedTotal = OnceFlag()
@@ -248,10 +278,6 @@ public struct WineInstaller: AppInstalling {
         }
 
         guard extract else { return }
-        let extractionRoot = cache.appendingPathComponent(
-            destination.deletingPathExtension().lastPathComponent,
-            isDirectory: true
-        )
         do {
             try Archive.extract(archive: destination, to: extractionRoot, format: .zip)
         } catch {
@@ -262,12 +288,19 @@ public struct WineInstaller: AppInstalling {
     private func runProcess(
         command: String,
         arguments: [String],
+        workingDirectory: String?,
         bottleName: String,
         bottle: Bottle,
         manager: BottleManager,
         cache: URL,
-        environment: [String: String]
+        environment: [String: String],
+        overrides: [String: String]
     ) throws -> Int32 {
+        let directory = resolvedWorkingDirectory(
+            workingDirectory,
+            driveC: bottle.driveCDirectory,
+            environment: environment
+        )
         if InstallPlanner.commandLooksLikeFile(command, driveC: bottle.driveCDirectory, cache: cache, environment: environment) {
             let path = InstallPlanner.resolveLocalPath(
                 command,
@@ -275,9 +308,41 @@ public struct WineInstaller: AppInstalling {
                 cache: cache,
                 environment: environment
             )
-            return try manager.run(named: bottleName, executable: URL(fileURLWithPath: path), arguments: arguments)
+            return try manager.run(
+                named: bottleName,
+                executable: URL(fileURLWithPath: path),
+                arguments: arguments,
+                workingDirectory: directory,
+                extraEnvironment: overrides
+            )
         }
-        return try manager.exec(named: bottleName, command: command, arguments: arguments)
+        return try manager.exec(
+            named: bottleName,
+            command: command,
+            arguments: arguments,
+            workingDirectory: directory,
+            extraEnvironment: overrides
+        )
+    }
+
+    /// Resolve a recipe's `workingDirectory` (usually a Windows path) to an
+    /// existing directory inside the prefix. Missing or non-directory values
+    /// are ignored so Wine falls back to the executable's folder.
+    private func resolvedWorkingDirectory(
+        _ raw: String?,
+        driveC: URL,
+        environment: [String: String]
+    ) -> URL? {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let path = InstallPlanner.resolveWindowsPath(raw, driveC: driveC, environment: environment)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
     }
 
     private func performShortcut(
@@ -302,26 +367,46 @@ public struct WineInstaller: AppInstalling {
 
         onEvent(.shortcut(spec.name))
 
-        if createShortcutViaWine(spec, bottleName: bottleName, bottle: bottle, manager: manager) {
+        let expanded = expandedShortcutSpec(spec, environment: environment)
+        if createShortcutViaWine(expanded, bottleName: bottleName, bottle: bottle, manager: manager) {
             return
         }
 
         // Fallback: write the minimal `.lnk` directly (no runtime required).
         let linkPath = InstallPlanner.resolveWindowsPath(
-            spec.linkWindowsPath,
+            expanded.linkWindowsPath,
             driveC: bottle.driveCDirectory,
             environment: environment
         )
         do {
             let url = URL(fileURLWithPath: linkPath)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try ShortcutWriter.minimalLink(spec).write(to: url, options: .atomic)
+            try ShortcutWriter.minimalLink(expanded).write(to: url, options: .atomic)
             onEvent(.warning(
                 "created a minimal .lnk for '\(spec.name)'; it may lack an icon or full shell metadata."
             ))
         } catch {
             onEvent(.warning("could not create shortcut '\(spec.name)': \(describe(error))"))
         }
+    }
+
+    /// Expand `%StartMenu%`, `%ProgramFiles%`, … in the paths written into the
+    /// shortcut. Windows resolves these at creation time, and Wine's shell may
+    /// not inherit the same variables, so do it explicitly.
+    private func expandedShortcutSpec(
+        _ spec: ShortcutSpec,
+        environment: [String: String]
+    ) -> ShortcutSpec {
+        ShortcutSpec(
+            name: InstallPlanner.expandEnvironment(spec.name, environment: environment),
+            linkWindowsPath: InstallPlanner.expandEnvironment(spec.linkWindowsPath, environment: environment),
+            targetWindowsPath: InstallPlanner.expandEnvironment(spec.targetWindowsPath, environment: environment),
+            workingDirectoryWindowsPath: spec.workingDirectoryWindowsPath.map {
+                InstallPlanner.expandEnvironment($0, environment: environment)
+            },
+            arguments: spec.arguments,
+            description: spec.description
+        )
     }
 
     /// Reconstruct the original step so ``ShortcutWriter`` can inspect optional

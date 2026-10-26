@@ -226,7 +226,11 @@ struct BottleCommand: AsyncParsableCommand {
             print(Terminal.dim(log.path))
             let contents: String
             do {
-                contents = try String(contentsOf: log, encoding: .utf8)
+                // Wine logs can contain non-UTF-8 bytes from programs that
+                // write binary data to stdout; decode those lossily instead of
+                // refusing to show the log at all.
+                let data = try Data(contentsOf: log)
+                contents = String(decoding: data, as: UTF8.self)
             } catch {
                 throw CorkError.fileSystem(reason: "could not read log file \(log.path): \(error.localizedDescription)")
             }

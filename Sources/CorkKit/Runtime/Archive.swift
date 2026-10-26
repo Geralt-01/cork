@@ -13,13 +13,21 @@ public enum Archive {
         }
     }
 
-    public static func listEntries(archive: URL) throws -> [String] {
-        let result = try ProcessRunner.run(
-            executable: "/usr/bin/tar",
-            arguments: ["-tf", archive.path]
-        )
+    public static func listEntries(archive: URL, format: Format = .tar) throws -> [String] {
+        let executable: String
+        let arguments: [String]
+        switch format {
+        case .zip:
+            executable = "/usr/bin/unzip"
+            arguments = ["-Z1", archive.path]
+        default:
+            executable = "/usr/bin/tar"
+            arguments = ["-tf", archive.path]
+        }
+        let result = try ProcessRunner.run(executable: executable, arguments: arguments)
         guard result.succeeded else {
-            throw CorkError.extractionFailed(reason: "tar -tf failed: \(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let tool = format == .zip ? "unzip -Z1" : "tar -tf"
+            throw CorkError.extractionFailed(reason: "\(tool) failed: \(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return result.stdout
             .split(separator: "\n", omittingEmptySubsequences: true)
@@ -48,11 +56,7 @@ public enum Archive {
         installRoot: String? = nil,
         format: Format
     ) throws {
-        guard format.isTar else {
-            throw CorkError.unsupported(reason: "archive format \(format.rawValue)")
-        }
-
-        let entries = try listEntries(archive: archive)
+        let entries = try listEntries(archive: archive, format: format)
         try validateEntries(entries)
 
         let fm = FileManager.default
@@ -63,10 +67,21 @@ public enum Archive {
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: staging) }
 
-        let result = try ProcessRunner.run(
-            executable: "/usr/bin/tar",
-            arguments: ["-xf", archive.path, "-C", staging.path]
-        )
+        let result: ProcessResult
+        switch format {
+        case .zip:
+            // `-o` overwrites staging files without prompting; the staging
+            // directory is always fresh, so there is nothing to preserve.
+            result = try ProcessRunner.run(
+                executable: "/usr/bin/unzip",
+                arguments: ["-q", "-o", archive.path, "-d", staging.path]
+            )
+        default:
+            result = try ProcessRunner.run(
+                executable: "/usr/bin/tar",
+                arguments: ["-xf", archive.path, "-C", staging.path]
+            )
+        }
         guard result.succeeded else {
             throw CorkError.extractionFailed(reason: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }

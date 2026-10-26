@@ -66,6 +66,11 @@ final class AppModel: ObservableObject {
     @Published var bottleIssues: [BottleListing.Issue] = []
     @Published var selectedBottleName: String?
 
+    /// Serializes setting writes from the detail pane and tracks the newest
+    /// edit so stale results are not reflected back into the UI.
+    private var pendingSettingUpdate: Task<Void, Never>?
+    private var settingRevision = 0
+
     // MARK: Create sheet
 
     @Published var showCreateSheet = false
@@ -124,6 +129,9 @@ final class AppModel: ObservableObject {
 
     @Published var discoveredPrograms: [DiscoveredProgram] = []
     @Published var isDiscoveringPrograms = false
+    /// Invalidates in-flight scans when the bottle changes, so a slow scan can
+    /// never publish another bottle's results.
+    private var programScanRevision = 0
 
     // MARK: App bundling
 
@@ -328,22 +336,32 @@ final class AppModel: ObservableObject {
 
     /// Applies a setting optimistically so the UI stays responsive, then
     /// persists in the background and reconciles the result.
+    ///
+    /// Updates are serialized and reconciled in revision order: rapid toggles
+    /// or typing must not let an older `setSetting` overwrite a newer one (and
+    /// backend switches must not install/remove DLLs concurrently).
     func applySetting(_ bottleName: String, key: BottleSettings.Key, value: String) {
         if let index = bottles.firstIndex(where: { $0.name == bottleName }) {
             try? bottles[index].metadata.settings.apply(key: key.rawValue, value: value)
         }
 
+        settingRevision += 1
+        let revision = settingRevision
+        let previous = pendingSettingUpdate
         guard let manager = bottleManager else { return }
         let box = UncheckedSendable(manager)
-        Task {
+        pendingSettingUpdate = Task {
+            _ = await previous?.value
             do {
                 let updated = try await Task.detached {
                     try box.value.setSetting(named: bottleName, key: key.rawValue, value: value)
                 }.value
+                guard revision == settingRevision else { return }
                 if let index = bottles.firstIndex(where: { $0.name == bottleName }) {
                     bottles[index] = updated
                 }
             } catch {
+                guard revision == settingRevision else { return }
                 present(error, title: "Could not update setting")
                 refreshBottles()
             }
@@ -514,8 +532,8 @@ final class AppModel: ObservableObject {
             )
             return
         }
-        if let text = try? String(contentsOf: url, encoding: .utf8) {
-            logsText = text
+        if let data = try? Data(contentsOf: url) {
+            logsText = String(decoding: data, as: UTF8.self)
             logsBottleName = bottleName
         } else {
             showAlert(
@@ -667,6 +685,23 @@ final class AppModel: ObservableObject {
         Task {
             defer { self.isInstalling = false }
             do {
+                // Resolve the recipe *before* creating a bottle: a catalog entry
+                // with no automated install must not leave an empty bottle
+                // behind.
+                guard let catalogFile else {
+                    throw CorkError.unsupported(reason: "no catalog is loaded, so there is no install recipe")
+                }
+
+                let recipes = try await Task.detached {
+                    try CrossTieInstallRecipes(fileURL: catalogFile)
+                }.value
+
+                guard let recipe = recipes.installRecipe(appID: appID) else {
+                    self.appendInstallLog("No automated install recipe is available for “\(appName)”.")
+                    self.installOutcome = .noRecipe
+                    return
+                }
+
                 if createNew {
                     guard let box else { throw CorkError.runtimeNotInstalled }
                     self.appendInstallLog("Creating bottle “\(targetBottle)”…")
@@ -681,20 +716,6 @@ final class AppModel: ObservableObject {
                     }.value
                     self.refreshBottles()
                     self.selectedBottleName = targetBottle
-                }
-
-                guard let catalogFile else {
-                    throw CorkError.unsupported(reason: "no catalog is loaded, so there is no install recipe")
-                }
-
-                let recipes = try await Task.detached {
-                    try CrossTieInstallRecipes(fileURL: catalogFile)
-                }.value
-
-                guard let recipe = recipes.installRecipe(appID: appID) else {
-                    self.appendInstallLog("No automated install recipe is available for “\(appName)”.")
-                    self.installOutcome = .noRecipe
-                    return
                 }
 
                 self.appendInstallLog("Executing \(recipe.steps.count) recipe step(s).")
@@ -770,6 +791,8 @@ final class AppModel: ObservableObject {
     }
 
     func selectFilesBottle(_ name: String?) {
+        programScanRevision += 1
+        isDiscoveringPrograms = false
         filesBottleName = name
         browserComponents = []
         browserSelectedURL = nil
@@ -836,6 +859,9 @@ final class AppModel: ObservableObject {
             present(CorkError.bottleNotFound(name: filesBottleName ?? ""), title: "Cannot scan bottle")
             return
         }
+        programScanRevision += 1
+        let revision = programScanRevision
+        let targetName = bottle.name
         isDiscoveringPrograms = true
         let root = bottle.driveCDirectory
         let pins = bottle.metadata.pins
@@ -844,6 +870,9 @@ final class AppModel: ObservableObject {
             let found = await Task.detached { () -> [DiscoveredProgram] in
                 BottleFiles.discoverExecutables(under: root, limit: 400)
             }.value
+            guard revision == self.programScanRevision,
+                  self.filesBottle?.name == targetName else { return }
+            self.filesBottleName = targetName
             self.discoveredPrograms = BottleFiles.merge(pins: pins, discovered: found)
             self.isDiscoveringPrograms = false
         }

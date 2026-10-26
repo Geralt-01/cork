@@ -45,10 +45,12 @@ public struct WineInstallation: Sendable {
     }
 
     public func version() -> String? {
+        var environment = ProcessInfo.processInfo.environment
+        environment["WINEDEBUG"] = "-all"
         guard let result = try? ProcessRunner.run(
             executable: wineBinary,
             arguments: ["--version"],
-            environment: ["WINEDEBUG": "-all"]
+            environment: environment
         ) else { return nil }
         let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output

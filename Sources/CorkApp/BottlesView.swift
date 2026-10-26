@@ -5,7 +5,10 @@ import CorkKit
 /// actions that operate on the current selection.
 struct BottlesView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var pendingDelete: String?
+    // `@State` is implemented by a compiler macro that ships with Xcode. Cork
+    // also supports building with only the Command Line Tools, where that macro
+    // plugin is unavailable, so view-local state uses `@StateObject` instead.
+    @StateObject private var ui = BottlesViewState()
 
     var body: some View {
         Group {
@@ -51,12 +54,12 @@ struct BottlesView: View {
         .navigationTitle("Bottles")
         .frame(minWidth: 240)
         .toolbar { toolbarContent }
-        .alert("Delete Bottle?", isPresented: deletePresented, presenting: pendingDelete) { name in
+        .alert("Delete Bottle?", isPresented: deletePresented, presenting: ui.pendingDelete) { name in
             Button("Delete", role: .destructive) {
                 model.requestDelete(name)
-                pendingDelete = nil
+                ui.pendingDelete = nil
             }
-            Button("Cancel", role: .cancel) { pendingDelete = nil }
+            Button("Cancel", role: .cancel) { ui.pendingDelete = nil }
         } message: { name in
             Text("This permanently removes “\(name)” and its Windows prefix. This cannot be undone.")
         }
@@ -70,8 +73,8 @@ struct BottlesView: View {
 
     private var deletePresented: Binding<Bool> {
         Binding(
-            get: { pendingDelete != nil },
-            set: { if !$0 { pendingDelete = nil } }
+            get: { ui.pendingDelete != nil },
+            set: { if !$0 { ui.pendingDelete = nil } }
         )
     }
 
@@ -117,7 +120,7 @@ struct BottlesView: View {
             .disabled(model.selectedBottleName == nil)
 
             Button {
-                pendingDelete = model.selectedBottleName
+                ui.pendingDelete = model.selectedBottleName
             } label: {
                 Label("Delete", systemImage: "trash")
             }
@@ -132,6 +135,13 @@ struct BottlesView: View {
             .help("Reload the bottle list")
         }
     }
+}
+
+/// View-local state for `BottlesView`. See the note on `@StateObject` usage in
+/// the view: this type keeps the code buildable without Xcode's SwiftUI macro
+/// plugin.
+final class BottlesViewState: ObservableObject {
+    @Published var pendingDelete: String?
 }
 
 /// A compact summary row for one bottle.

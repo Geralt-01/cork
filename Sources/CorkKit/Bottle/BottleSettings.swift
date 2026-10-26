@@ -18,7 +18,7 @@ public struct BottleSettings: Codable, Sendable, Equatable {
         dxvkAsync: Bool = true,
         metalHUD: Bool = false,
         dxvkHUD: String? = nil,
-        debugChannels: String = "fixme-all"
+        debugChannels: String = ""
     ) {
         self.windowsVersion = windowsVersion
         self.backend = backend

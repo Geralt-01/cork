@@ -72,6 +72,7 @@ public struct AssociationStore: Sendable {
     /// Never throws on a missing or corrupt file: both yield an empty list so
     /// callers can treat "no associations" and "unreadable file" alike.
     public func read(bottle: String) throws -> [AssociationEntry] {
+        try Bottle.validateName(bottle)
         let url = fileURL(bottle: bottle)
         guard let data = try? Data(contentsOf: url) else { return [] }
         guard let file = try? JSONDecoder.cork.decode(AssociationFile.self, from: data) else {
@@ -85,6 +86,8 @@ public struct AssociationStore: Sendable {
     /// Entries are canonicalised, de-duplicated and sorted, then written
     /// atomically. Registry application is best-effort.
     public func write(bottle: String, entries: [AssociationEntry]) throws {
+        try Bottle.validateName(bottle)
+        let previous = (try? read(bottle: bottle)) ?? []
         let normalized = entries.normalizedAssociations()
         let url = fileURL(bottle: bottle)
         try FileManager.default.createDirectory(
@@ -93,7 +96,7 @@ public struct AssociationStore: Sendable {
         )
         let file = AssociationFile(entries: normalized)
         try JSONEncoder.cork.encode(file).write(to: url, options: .atomic)
-        applyToWineRegistry(bottle: bottle, entries: normalized)
+        applyToWineRegistry(bottle: bottle, entries: normalized, previous: previous)
     }
 
     /// Add/replace a single association.
@@ -160,7 +163,11 @@ public struct AssociationStore: Sendable {
 
     /// Best-effort registry application. Never throws: the JSON file is the
     /// source of truth, so a missing bottle or runtime only warns.
-    private func applyToWineRegistry(bottle: String, entries: [AssociationEntry]) {
+    private func applyToWineRegistry(
+        bottle: String,
+        entries: [AssociationEntry],
+        previous: [AssociationEntry]
+    ) {
         guard appliesRegistry else { return }
         guard FileManager.default.fileExists(atPath: paths.bottleDirectory(named: bottle).path) else {
             warn("bottle '\(bottle)' not found; associations saved but not applied to the registry")
@@ -177,6 +184,25 @@ public struct AssociationStore: Sendable {
         guard manager.runtime.isWineReady else {
             warn("Wine runtime not installed; associations saved but not applied to the registry")
             return
+        }
+
+        // Remove stale mappings first: an extension that has been unassigned and
+        // any ProgID no longer referenced by a remaining entry.
+        let currentProgIDs = Set(entries.map(\.progID))
+        let removedProgIDs = Set(previous.map(\.progID)).subtracting(currentProgIDs)
+        let currentExtensions = Set(entries.map(\.fileExtension))
+        let removedExtensions = Set(previous.map(\.fileExtension)).subtracting(currentExtensions)
+        let removals = AssociationRegistry.removalCommands(
+            progIDs: removedProgIDs,
+            fileExtensions: removedExtensions
+        )
+        for arguments in removals {
+            do {
+                _ = try manager.exec(named: bottle, command: "reg", arguments: arguments)
+            } catch {
+                warn("could not remove stale association registry key: \(describe(error))")
+                break
+            }
         }
 
         for entry in entries {

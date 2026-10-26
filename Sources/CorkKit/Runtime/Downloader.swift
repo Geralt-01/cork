@@ -21,9 +21,6 @@ public enum Downloader {
     ) async throws {
         let fm = FileManager.default
         try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: destination.path) {
-            try fm.removeItem(at: destination)
-        }
         let session = DownloadSession(destination: destination, progress: progress)
         try await session.start(url: url)
     }
@@ -34,6 +31,7 @@ private final class DownloadSession: NSObject, URLSessionDownloadDelegate, @unch
     private let progress: (@Sendable (DownloadProgress) -> Void)?
     private var continuation: CheckedContinuation<Void, Error>?
     private var session: URLSession?
+    private var temporaryURL: URL?
     private var didFinishDownloading = false
     private var completed = false
     private var sourceURLString = ""
@@ -76,11 +74,12 @@ private final class DownloadSession: NSObject, URLSessionDownloadDelegate, @unch
             return
         }
         do {
-            let fm = FileManager.default
-            if fm.fileExists(atPath: destination.path) {
-                try fm.removeItem(at: destination)
-            }
-            try fm.moveItem(at: location, to: destination)
+            // Keep the download beside the destination until it is complete, so
+            // a failed transfer never destroys a previously cached installer.
+            let temporary = destination.deletingLastPathComponent()
+                .appendingPathComponent(".\(UUID().uuidString)-\(destination.lastPathComponent)")
+            try FileManager.default.moveItem(at: location, to: temporary)
+            temporaryURL = temporary
             didFinishDownloading = true
         } catch {
             finish(.failure(CorkError.downloadFailed(url: sourceURLString, underlying: error.localizedDescription)))
@@ -91,15 +90,44 @@ private final class DownloadSession: NSObject, URLSessionDownloadDelegate, @unch
         if let error {
             finish(.failure(CorkError.downloadFailed(url: sourceURLString, underlying: error.localizedDescription)))
         } else if didFinishDownloading {
-            finish(.success(()))
+            do {
+                try commit()
+                finish(.success(()))
+            } catch {
+                finish(.failure(CorkError.downloadFailed(url: sourceURLString, underlying: error.localizedDescription)))
+            }
         } else {
             finish(.failure(CorkError.downloadFailed(url: sourceURLString, underlying: "download did not produce a file")))
+        }
+    }
+
+    /// Atomically replace the cached destination with the completed download.
+    private func commit() throws {
+        let fm = FileManager.default
+        guard let temporaryURL else { return }
+        let backup = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(UUID().uuidString)-\(destination.lastPathComponent).backup")
+        let hadExisting = fm.fileExists(atPath: destination.path)
+        if hadExisting {
+            try fm.moveItem(at: destination, to: backup)
+        }
+        do {
+            try fm.moveItem(at: temporaryURL, to: destination)
+            self.temporaryURL = nil
+            if hadExisting { try? fm.removeItem(at: backup) }
+        } catch {
+            if hadExisting { try? fm.moveItem(at: backup, to: destination) }
+            throw error
         }
     }
 
     private func finish(_ result: Result<Void, Error>) {
         guard !completed else { return }
         completed = true
+        if case .failure = result, let temporaryURL {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            self.temporaryURL = nil
+        }
         session?.invalidateAndCancel()
         session = nil
         let continuation = self.continuation

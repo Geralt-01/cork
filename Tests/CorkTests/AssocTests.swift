@@ -180,6 +180,17 @@ func assocTests() -> [TestCase] {
                        "expected four printable command lines")
         }),
 
+        TestCase(name: "registryRemovalCommandsDeleteStaleKeys", body: {
+            let commands = AssociationRegistry.removalCommands(
+                progIDs: ["Old.ProgID", "Cork.Notepad"],
+                fileExtensions: [".psd"]
+            )
+            try expectEqual(commands.count, 3)
+            try expectEqual(commands[0], ["delete", #"HKCU\Software\Classes\.psd"#, "/f"])
+            try expectEqual(commands[1], ["delete", #"HKCU\Software\Classes\Cork.Notepad"#, "/f"])
+            try expectEqual(commands[2], ["delete", #"HKCU\Software\Classes\Old.ProgID"#, "/f"])
+        }),
+
         TestCase(name: "registerInBundleWritesDocumentTypes", body: {
             let (store, root) = try makeStore()
             defer { try? FileManager.default.removeItem(at: root) }

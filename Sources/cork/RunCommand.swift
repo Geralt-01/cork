@@ -12,23 +12,22 @@ struct RunCommand: AsyncParsableCommand {
     @Argument(help: "Name of the bottle.")
     var bottle: String
 
-    @Argument(help: "Path to a Windows .exe or .msi.")
+    @Argument(help: "Path to a Windows .exe or .msi (Unix, ~, or C:\\…; bare names resolve inside the bottle).")
     var executable: String
 
     @Flag(name: .long, help: "Launch and return immediately instead of waiting for the program to exit.")
     var detach = false
 
-    @Argument(parsing: .captureForPassthrough, help: "Arguments for the Windows program.")
+    @Argument(parsing: .allUnrecognized, help: "Arguments for the Windows program.")
     var passthrough: [String] = []
 
     func run() async throws {
         let manager = try BottleManager()
-        let url = URL(fileURLWithPath: (executable as NSString).expandingTildeInPath)
 
-        print(Terminal.arrow("launching \(url.lastPathComponent) in bottle '\(bottle)'"))
+        print(Terminal.arrow("launching \(executable) in bottle '\(bottle)'"))
         let status = try manager.run(
             named: bottle,
-            executable: url,
+            executablePath: executable,
             arguments: passthrough,
             detach: detach,
             onLine: { line in

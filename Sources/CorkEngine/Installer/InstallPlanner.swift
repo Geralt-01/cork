@@ -8,7 +8,13 @@ import Foundation
 public enum InstallAction: Sendable, Equatable {
     case download(url: String, fileName: String, extractArchive: Bool)
     case setWindowsVersion(String)
-    case run(command: String, arguments: [String], workingDirectory: String?, isInstaller: Bool)
+    case run(
+        command: String,
+        arguments: [String],
+        workingDirectory: String?,
+        isInstaller: Bool,
+        environment: [String: String]
+    )
     case copyFiles(source: String, destination: String)
     case createShortcut(target: String, name: String, workingDirectory: String?, arguments: [String])
     case registry(key: String, name: String, data: String)
@@ -63,14 +69,26 @@ public enum InstallPlanner {
                 return .skip(reason: "runInstaller step has no command")
             }
             let arguments = step.silentArguments.isEmpty ? step.arguments : step.silentArguments
-            return .run(command: command, arguments: arguments, workingDirectory: step.workingDirectory, isInstaller: true)
+            return .run(
+                command: command,
+                arguments: arguments,
+                workingDirectory: step.workingDirectory,
+                isInstaller: true,
+                environment: step.environment
+            )
 
         case .runCommand:
             guard let command = nonEmpty(step.command) else {
                 return .skip(reason: "runCommand step has no command")
             }
             let arguments = step.arguments.isEmpty ? step.silentArguments : step.arguments
-            return .run(command: command, arguments: arguments, workingDirectory: step.workingDirectory, isInstaller: false)
+            return .run(
+                command: command,
+                arguments: arguments,
+                workingDirectory: step.workingDirectory,
+                isInstaller: false,
+                environment: step.environment
+            )
 
         case .copyFiles:
             guard let source = nonEmpty(step.source) else {
@@ -127,9 +145,50 @@ public enum InstallPlanner {
         fileName.lowercased().hasSuffix(".zip")
     }
 
+    /// Installer exit codes that still mean "installed". Windows installers
+    /// commonly return 3010 (reboot required) or 1641 (reboot initiated).
+    public static func isSuccessfulInstallerStatus(_ status: Int32) -> Bool {
+        status == 0 || status == 3010 || status == 1641
+    }
+
     private static func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
+    }
+
+    /// Split a command-line fragment on whitespace while honouring quotes, so
+    /// `"/D=C:\Program Files\App"` stays one argument. Empty quoted arguments
+    /// are preserved.
+    public static func splitCommandLine(_ value: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        var quote: Character?
+        var hasToken = false
+
+        for character in value {
+            if let active = quote {
+                if character == active {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                hasToken = true
+            } else if character == "\"" {
+                quote = character
+                hasToken = true
+            } else if character.isWhitespace {
+                if hasToken {
+                    result.append(current)
+                    current = ""
+                    hasToken = false
+                }
+            } else {
+                current.append(character)
+                hasToken = true
+            }
+        }
+        if hasToken { result.append(current) }
+        return result
     }
 
     // MARK: - Registry
@@ -155,11 +214,16 @@ public enum InstallPlanner {
             "systemdrive": "C:",
             "programdata": "C:\\ProgramData",
             "userprofile": user,
+            "username": userName,
             "appdata": "\(user)\\AppData\\Roaming",
             "localappdata": "\(user)\\AppData\\Local",
             "temp": "\(user)\\AppData\\Local\\Temp",
             "tmp": "\(user)\\AppData\\Local\\Temp",
             "public": "C:\\users\\Public",
+            "desktop": "\(user)\\Desktop",
+            "startmenu": "\(user)\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu",
+            "startmenu\\programs": "\(user)\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+            "favorites": "\(user)\\Favorites",
         ]
     }
 
@@ -181,6 +245,10 @@ public enum InstallPlanner {
 
     /// Resolve a Windows path (`C:\…`, `%ProgramFiles%\…`) to a unix path inside
     /// the bottle. Already-unix paths are returned standardized.
+    ///
+    /// UNC shares and drive mappings that point outside the bottle are never
+    /// followed: they resolve to an inert path under `drive_c/.cork-unmapped`
+    /// so a recipe cannot read or write arbitrary host files.
     public static func resolveWindowsPath(
         _ path: String,
         driveC: URL,
@@ -190,13 +258,25 @@ public enum InstallPlanner {
         if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
             value = String(value.dropFirst().dropLast())
         }
+        guard !value.isEmpty else { return driveC.standardizedFileURL.path }
+
+        if isUNCPath(value) {
+            return unresolvedPath(value, driveC: driveC, kind: "unc")
+        }
+
         value = expandEnvironment(value, environment: environment)
+        if isUNCPath(value) {
+            return unresolvedPath(value, driveC: driveC, kind: "unc")
+        }
+
         value = value.replacingOccurrences(of: "\\", with: "/")
 
         if value.hasPrefix("~") {
             return (value as NSString).expandingTildeInPath
         }
         if value.hasPrefix("/") {
+            // Native unix paths are deliberate (a recipe may reference a file
+            // Cork itself downloaded), so they pass through unchanged.
             return URL(fileURLWithPath: value).standardizedFileURL.path
         }
 
@@ -205,20 +285,67 @@ public enum InstallPlanner {
             let letter = String(chars[0]).lowercased()
             let rest = String(chars.dropFirst(2))
             let trimmed = rest.hasPrefix("/") ? String(rest.dropFirst()) : rest
+
             let base: URL
             if letter == "c" {
                 base = driveC
             } else {
-                base = driveC.deletingLastPathComponent()
+                let bottleRoot = driveC.deletingLastPathComponent().standardizedFileURL
+                let device = driveC.deletingLastPathComponent()
                     .appendingPathComponent("dosdevices", isDirectory: true)
                     .appendingPathComponent("\(letter):", isDirectory: true)
+                guard FileManager.default.fileExists(atPath: device.path) else {
+                    return unresolvedPath(value, driveC: driveC, kind: "drive-\(letter)")
+                }
+                let resolved = device.resolvingSymlinksInPath().standardizedFileURL
+                guard isContained(resolved.path, in: bottleRoot) else {
+                    return unresolvedPath(value, driveC: driveC, kind: "drive-\(letter)")
+                }
+                base = resolved
             }
-            if trimmed.isEmpty { return base.standardizedFileURL.path }
-            return base.appendingPathComponent(trimmed).standardizedFileURL.path
+
+            let candidate = trimmed.isEmpty
+                ? base.standardizedFileURL
+                : base.appendingPathComponent(trimmed).standardizedFileURL
+            guard isContained(candidate.path, in: base) else {
+                return unresolvedPath(value, driveC: driveC, kind: "drive-\(letter)")
+            }
+            return candidate.path
         }
 
-        if value.isEmpty { return driveC.standardizedFileURL.path }
-        return driveC.appendingPathComponent(value).standardizedFileURL.path
+        guard !value.isEmpty else { return driveC.standardizedFileURL.path }
+        let candidate = driveC.appendingPathComponent(value).standardizedFileURL
+        guard isContained(candidate.path, in: driveC) else {
+            return unresolvedPath(value, driveC: driveC, kind: "relative")
+        }
+        return candidate.path
+    }
+
+    /// True for `\\server\share` and `//server/share` paths.
+    static func isUNCPath(_ value: String) -> Bool {
+        value.hasPrefix("\\\\") || value.hasPrefix("//")
+    }
+
+    private static func isContained(_ path: String, in root: URL) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        return path == rootPath || path.hasPrefix(rootPath + "/")
+    }
+
+    /// A harmless, bottle-local destination for paths Cork refuses to map.
+    /// Components are sanitised so nothing can traverse out of `drive_c`.
+    private static func unresolvedPath(_ raw: String, driveC: URL, kind: String) -> String {
+        let root = driveC
+            .appendingPathComponent(".cork-unmapped", isDirectory: true)
+            .appendingPathComponent(kind, isDirectory: true)
+        let parts = raw
+            .replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { component -> String in
+                let text = String(component)
+                if text == "." || text == ".." { return "_" }
+                return text.replacingOccurrences(of: ":", with: "_")
+            }
+        return parts.reduce(root) { $0.appendingPathComponent($1) }.standardizedFileURL.path
     }
 
     /// Resolve a recipe path to a local (unix) path, checking the bottle's
@@ -314,7 +441,7 @@ public enum InstallPlanner {
         return name.range(of: regex, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
-    static func expandEnvironment(_ value: String, environment: [String: String]) -> String {
+    public static func expandEnvironment(_ value: String, environment: [String: String]) -> String {
         guard value.contains("%") else { return value }
         var lowered: [String: String] = [:]
         for (key, replacement) in environment { lowered[key.lowercased()] = replacement }

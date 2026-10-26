@@ -27,25 +27,84 @@ public enum WineProcess {
             try FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             FileManager.default.createFile(atPath: logFile.path, contents: nil)
             logHandle = try FileHandle(forWritingTo: logFile)
+            try logHandle?.truncate(atOffset: 0)
         }
 
         let sink = OutputSink(logHandle: logHandle, onLine: onLine)
+        let eof = DispatchGroup()
+        eof.enter()
+        eof.enter()
+
         outPipe.fileHandleForReading.readabilityHandler = { handle in
-            sink.append(handle.availableData)
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                eof.leave()
+            } else {
+                sink.append(data)
+            }
         }
         errPipe.fileHandleForReading.readabilityHandler = { handle in
-            sink.append(handle.availableData)
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                eof.leave()
+            } else {
+                sink.append(data)
+            }
         }
 
         try process.run()
         process.waitUntilExit()
 
-        outPipe.fileHandleForReading.readabilityHandler = nil
-        errPipe.fileHandleForReading.readabilityHandler = nil
+        // Wait for the pipe readers to deliver everything written before exit.
+        // A detached child can keep the pipes open indefinitely (for example
+        // `wine start /unix`), so bound the wait instead of blocking `--detach`.
+        if eof.wait(timeout: .now() + .milliseconds(500)) == .timedOut {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+        }
         sink.finish()
         try? logHandle?.close()
 
         return process.terminationStatus
+    }
+
+    /// Start a process and return as soon as it has been spawned. Output goes to
+    /// `logFile`; the child is never awaited, so `--detach` cannot block on a
+    /// launcher (such as `wine start` or `msiexec`) that stays alive.
+    public static func launchDetached(
+        executable: URL,
+        arguments: [String] = [],
+        environment: [String: String]? = nil,
+        currentDirectory: URL? = nil,
+        logFile: URL? = nil
+    ) throws {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        if let environment { process.environment = environment }
+        if let currentDirectory { process.currentDirectoryURL = currentDirectory }
+        process.standardInput = FileHandle.nullDevice
+
+        var logHandle: FileHandle?
+        if let logFile {
+            try FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: logFile.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: logFile)
+            try handle.truncate(atOffset: 0)
+            logHandle = handle
+            process.standardOutput = handle
+            process.standardError = handle
+        } else {
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+        }
+
+        try process.run()
+        // The child has its own duplicated descriptors after spawn; the parent
+        // can close its handles and exit without affecting it.
+        try? logHandle?.close()
     }
 
     @discardableResult
@@ -83,6 +142,7 @@ private final class OutputSink: @unchecked Sendable {
     private let logHandle: FileHandle?
     private let onLine: (@Sendable (String) -> Void)?
     private var buffer = Data()
+    private var finished = false
 
     init(logHandle: FileHandle?, onLine: (@Sendable (String) -> Void)?) {
         self.logHandle = logHandle
@@ -92,6 +152,7 @@ private final class OutputSink: @unchecked Sendable {
     func append(_ data: Data) {
         guard !data.isEmpty else { return }
         queue.async {
+            guard !self.finished else { return }
             self.logHandle?.write(data)
             self.buffer.append(data)
             while let index = self.buffer.firstIndex(of: 0x0A) {
@@ -104,6 +165,7 @@ private final class OutputSink: @unchecked Sendable {
 
     func finish() {
         queue.sync {
+            self.finished = true
             if !buffer.isEmpty {
                 onLine?(String(decoding: buffer, as: UTF8.self))
                 buffer.removeAll()

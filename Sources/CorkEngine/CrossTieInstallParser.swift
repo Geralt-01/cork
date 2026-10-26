@@ -438,9 +438,7 @@ extension CrossTieInstallRecord {
     }
 
     private static func splitArguments(_ raw: [String]) -> [String] {
-        raw.flatMap { value in
-            value.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).map(String.init)
-        }
+        raw.flatMap { InstallPlanner.splitCommandLine($0) }
     }
 
     /// Last path component, accepting both `/` and `\`.
@@ -821,7 +819,7 @@ private final class CrossTieInstallSAXDelegate: NSObject, XMLParserDelegate {
         if let closing = trimmed[afterOpening...].firstIndex(of: "\"") {
             let target = String(trimmed[afterOpening..<closing])
             let rest = String(trimmed[trimmed.index(after: closing)...]).trimmingCharacters(in: .whitespaces)
-            return (target, rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init))
+            return (target, InstallPlanner.splitCommandLine(rest))
         }
         return (unquote(trimmed), [])
     }

@@ -1,17 +1,25 @@
 import SwiftUI
 import CorkKit
 
+/// Observable form state for `CreateBottleSheet`.
+final class CreateBottleForm: ObservableObject {
+    @Published var name = ""
+    @Published var backend: GraphicsBackend = .dxmt
+    @Published var windows: WindowsVersion = .win10
+}
+
 /// Sheet for creating a bottle. Shows live progress from `BottleCreateEvent`.
 struct CreateBottleSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var name = ""
-    @State private var backend: GraphicsBackend = .dxmt
-    @State private var windows: WindowsVersion = .win10
+    // `@State` relies on Xcode's SwiftUI macro plugin, which is not present in
+    // a Command Line Tools-only install. `@StateObject` gives us the same
+    // persisted, observable storage without the macro.
+    @StateObject private var form = CreateBottleForm()
 
     private var isValid: Bool {
-        (try? Bottle.validateName(name.trimmingCharacters(in: .whitespacesAndNewlines))) != nil
+        (try? Bottle.validateName(form.name.trimmingCharacters(in: .whitespacesAndNewlines))) != nil
     }
 
     var body: some View {
@@ -22,13 +30,13 @@ struct CreateBottleSheet: View {
 
             Form {
                 LabeledContent("Name") {
-                    TextField("My Bottle", text: $name)
+                    TextField("My Bottle", text: $form.name)
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 220)
                         .disabled(model.isCreating)
                 }
                 LabeledContent("Graphics backend") {
-                    Picker("", selection: $backend) {
+                    Picker("", selection: $form.backend) {
                         ForEach(GraphicsBackend.allCases, id: \.self) { backend in
                             Text(backend.displayName).tag(backend)
                         }
@@ -38,7 +46,7 @@ struct CreateBottleSheet: View {
                     .disabled(model.isCreating)
                 }
                 LabeledContent("Windows version") {
-                    Picker("", selection: $windows) {
+                    Picker("", selection: $form.windows) {
                         ForEach(WindowsVersion.allCases, id: \.self) { version in
                             Text(version.displayName).tag(version)
                         }
@@ -51,7 +59,7 @@ struct CreateBottleSheet: View {
             .formStyle(.grouped)
             .frame(height: 210)
 
-            Text("Backend: \(backend.summary)")
+            Text("Backend: \(form.backend.summary)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -79,8 +87,8 @@ struct CreateBottleSheet: View {
                     .disabled(model.isCreating)
                 Button("Create") {
                     model.createBottle(
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                        settings: BottleSettings(windowsVersion: windows, backend: backend)
+                        name: form.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                        settings: BottleSettings(windowsVersion: form.windows, backend: form.backend)
                     )
                 }
                 .keyboardShortcut(.defaultAction)
